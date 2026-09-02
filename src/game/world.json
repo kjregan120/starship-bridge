@@ -1,0 +1,101 @@
+{
+  "ship": {
+    "name": "USS Meridian",
+    "registry": "NCC-74210",
+    "location": "sol-relay",
+    "shields": false,
+    "alert": "condition-green"
+  },
+  "systems": {
+    "sol-relay": {
+      "name": "Sol Relay Station",
+      "star": "G-type main sequence",
+      "bodies": ["waypoint-beacon", "tarsus-iii", "tarsus-iv"]
+    },
+    "erebus": {
+      "name": "Erebus",
+      "star": "M-type red dwarf",
+      "bodies": ["erebus-i", "the-drifter"]
+    },
+    "vela-gate": {
+      "name": "Vela Gate",
+      "star": "A-type white",
+      "bodies": ["vela-prime", "vela-b"]
+    }
+  },
+  "bodies": {
+    "waypoint-beacon": {
+      "name": "Waypoint Beacon",
+      "type": "station",
+      "habitable": null,
+      "atmosphere": "artificial",
+      "scan": "Federation navigation beacon. Broadcasting standard relay traffic. No life signs beyond automated systems.",
+      "hailable": true,
+      "hail": "Waypoint Beacon acknowledges. Safe travels, Meridian. Relay logs are clear.",
+      "color": "#88aaff",
+      "size": 0.6
+    },
+    "tarsus-iii": {
+      "name": "Tarsus III",
+      "type": "planet",
+      "habitable": true,
+      "atmosphere": "nitrogen-oxygen, class-M",
+      "scan": "Class-M world. Liquid water oceans, temperate bands, dense vegetation. No industrial emissions. No artificial signals. This world is unclaimed.",
+      "hailable": false,
+      "color": "#3b7d5a",
+      "size": 1.0
+    },
+    "tarsus-iv": {
+      "name": "Tarsus IV",
+      "type": "planet",
+      "habitable": false,
+      "atmosphere": "carbon dioxide, high pressure",
+      "scan": "Class-K world. Surface temperature exceeds 460 kelvin. Crushing atmosphere. Not survivable without full environmental suits.",
+      "hailable": false,
+      "color": "#b8703c",
+      "size": 0.9
+    },
+    "erebus-i": {
+      "name": "Erebus I",
+      "type": "planet",
+      "habitable": false,
+      "atmosphere": "trace methane",
+      "scan": "Airless rock, tidally locked to its red dwarf. Rich mineral signatures in the crust — dilithium traces detected. No life.",
+      "hailable": false,
+      "color": "#6b5b4a",
+      "size": 0.8
+    },
+    "the-drifter": {
+      "name": "SS Vanadis (derelict)",
+      "type": "derelict",
+      "habitable": null,
+      "atmosphere": "none — hull breached",
+      "scan": "Civilian transport, registry predates current Federation records. Hull cold. Minimal power on an emergency circuit. One faint life-sign reading — intermittent. No response to standard hails.",
+      "hailable": true,
+      "hail": "...static... —anyone receiving— ...environmental failing... please...",
+      "color": "#8a8f99",
+      "size": 0.7
+    },
+    "vela-prime": {
+      "name": "Vela Prime",
+      "type": "planet",
+      "habitable": true,
+      "atmosphere": "nitrogen-oxygen, class-M",
+      "scan": "Class-M world with active radio emissions in the 2 GHz band — structured, non-random. Something down there is broadcasting. Pattern does not match any known Federation language.",
+      "hailable": true,
+      "hail": "[UNIVERSAL TRANSLATOR: unable to resolve. Signal is language-like but unmatched. Establishing contact will require patience.]",
+      "color": "#4a6d9c",
+      "size": 1.0
+    },
+    "vela-b": {
+      "name": "Vela B",
+      "type": "planet",
+      "habitable": false,
+      "atmosphere": "hydrogen-helium",
+      "scan": "Gas giant. Violent storm systems. Sixteen moons, three large enough to hold atmosphere. Not a candidate for landing.",
+      "hailable": false,
+      "color": "#c9a36b",
+      "size": 1.4
+    }
+  }
+}
