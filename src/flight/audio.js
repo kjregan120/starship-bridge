@@ -193,6 +193,24 @@ export function playSignal(profile) {
       }
       break;
     }
+    case "beacon": { // artificial beacon — clean upward chirp at a strictly even
+                      // interval (no jitter, unlike every natural character
+                      // above) — that regularity is the "this isn't natural" tell
+      const o = osc("sine", profile.pitch);
+      const g = gain(0);
+      o.connect(g); g.connect(out);
+      const p = period(profile.eventRate);
+      let t = now + 0.3;
+      for (let i = 0; i < 2000; i++) {
+        o.frequency.setValueAtTime(profile.pitch, t);
+        o.frequency.linearRampToValueAtTime(profile.pitch * 1.6, t + 0.06);
+        g.gain.setValueAtTime(0, t);
+        g.gain.linearRampToValueAtTime(0.45, t + 0.015);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+        t += p;
+      }
+      break;
+    }
     case "click": { // moon — very sparse, quiet, cold — mostly silence
       const o = osc("sine", profile.pitch * 2);
       const g = gain(0);

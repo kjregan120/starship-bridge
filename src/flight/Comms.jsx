@@ -8,7 +8,7 @@
 // FlightApp.jsx for the always-visible now-playing indicator/stop control.
 import { useEffect, useState } from "react";
 import { nearestBody } from "./engine.js";
-import { signalProfile } from "../universe/signals.js";
+import { signalProfile, interpretSignal } from "../universe/signals.js";
 import { startListening, stopListening } from "./commsAudio.js";
 import { useUI } from "./store.js";
 import SignalScope from "./SignalScope.jsx";
@@ -29,6 +29,8 @@ export default function Comms() {
   const obj = nearest?.o ?? null;
   const profile = obj ? signalProfile(obj) : null;
   const listeningToThis = obj && listening?.id === obj.id;
+  const interpretation = obj && profile ? interpretSignal(obj, profile) : null;
+  const anomalous = obj?.type === "beacon" || (profile?.bands.find((b) => b.name === "Subspace")?.amplitude ?? 0) > 0.5;
 
   function toggleListen() {
     if (listeningToThis) stopListening();
@@ -55,6 +57,8 @@ export default function Comms() {
           </div>
 
           <div className="comms-side">
+            {anomalous && <div className="comms-alert">⚠ UNIDENTIFIED SIGNAL — POSSIBLE ARTIFICIAL SOURCE</div>}
+
             <div className="comms-target">
               <div className="comms-name">{obj.name}</div>
               <div className="comms-type">{[obj.type, obj.starClass, obj.kind].filter(Boolean).join(" — ")}</div>
@@ -78,6 +82,8 @@ export default function Comms() {
             <button className={`comms-listen ${listeningToThis ? "on" : ""}`} onClick={toggleListen}>
               {listeningToThis ? "◼ STOP" : "▶ LISTEN"}
             </button>
+            <div className="comms-interpretation">▸ {interpretation}</div>
+
             <div className="comms-note">
               Signal character: {profile.character}
               {profile.pulseHz ? ` · ${profile.pulseHz.toFixed(2)} Hz pulse` : ""}

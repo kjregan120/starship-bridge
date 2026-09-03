@@ -4,7 +4,8 @@ import Chart from "./Chart.jsx";
 import Comms from "./Comms.jsx";
 import { useUI } from "./store.js";
 import { stopListening } from "./commsAudio.js";
-import { sim, navList, nearestBody, startBodyName } from "./engine.js";
+import { sim, navList, nearestBody, nearbyObjects, startBodyName } from "./engine.js";
+import { signalProfile } from "../universe/signals.js";
 import { startSimLoop } from "./loop.js";
 import "./flight.css";
 
@@ -23,8 +24,10 @@ const STATION_HELP = {
   conn: "CONN — ahead full|half|quarter · reverse full|half|quarter · port|starboard <degrees> · all stop · come about for <name> · warp <1-3> to <name> · warp <1-3> · warp <1-3> route · drop out",
   science: "SCIENCE — scan · nav · status. External view for visual inspection of the nearest contact.",
   tactical: "TACTICAL — 3D chart. Drag to rotate, scroll to zoom, right-drag to pan. Shows any plotted course.",
-  comms: "COMMS — auto-monitors the nearest contact's signal bands. Press LISTEN to hear a sonification of it."
+  comms: "COMMS — auto-monitors the nearest contact's signal bands. Press LISTEN to hear a sonification of it. sweep for every contact in range · hail <name> to open a channel."
 };
+
+const SWEEP_RANGE = 1500;
 
 function handleCommand(text) {
   const t = text.trim().toLowerCase();
@@ -46,6 +49,35 @@ function handleCommand(text) {
     return;
   }
   if (/^(nav|status|report)/.test(t)) { sim.log("info", "See the panels for navigation and status."); return; }
+
+  if (/^sweep/.test(t)) {
+    const contacts = nearbyObjects(SWEEP_RANGE);
+    if (!contacts.length) { sim.log("info", `Sweep — no contacts within ${SWEEP_RANGE}u.`); return; }
+    // Beacons always surface regardless of distance rank — otherwise a
+    // crowded home system (a dozen planets/moons within 100u) buries the one
+    // thing more than a couple hundred u out that's actually worth hunting.
+    const beacons = contacts.filter(({ o }) => o.type === "beacon");
+    const others = contacts.filter(({ o }) => o.type !== "beacon").slice(0, 8);
+    const unidentified = beacons.length ? `, ${beacons.length} unidentified` : "";
+    sim.log("info", `Sweep — ${contacts.length} contact${contacts.length === 1 ? "" : "s"} within ${SWEEP_RANGE}u${unidentified}:`);
+    [...beacons, ...others].forEach(({ o, dx, dz, d }) => {
+      const bearing = ((Math.atan2(dz, dx) * 180) / Math.PI + 360) % 360;
+      const dom = signalProfile(o).bands.reduce((a, b) => (b.amplitude > a.amplitude ? b : a));
+      const flag = o.type === "beacon" ? " ⚠ possible artificial source" : "";
+      sim.log("info", `  ${d.toFixed(0)}u @ ${bearing.toFixed(0)}° — ${o.name} (${o.type}) — dominant ${dom.name} ${Math.round(dom.amplitude * 100)}%${flag}`);
+    });
+    return;
+  }
+  if ((m = t.match(/^hail(?:\s+(.+))?$/))) {
+    const query = m[1]?.trim().toLowerCase();
+    const body = query
+      ? nearbyObjects(SWEEP_RANGE).find(({ o }) => o.name.toLowerCase().includes(query))?.o
+      : nearestBody(SWEEP_RANGE)?.o;
+    if (!body) { sim.log("deny", query ? `No contact matching "${m[1]}" within range.` : "No contact in range to hail."); return; }
+    if (!body.hailable) { sim.log("deny", `${body.name} does not respond to hails.`); return; }
+    sim.log("info", `Channel open to ${body.name}. Incoming: "${body.hail}"`);
+    return;
+  }
 
   if ((m = t.match(/^ahead\s+(full|standard|half|third|quarter)/))) { sim.ahead(THROTTLE[m[1]]); return; }
   if ((m = t.match(/^(?:reverse|back|astern)\s+(full|standard|half|third|quarter)/))) { sim.reverse(THROTTLE[m[1]]); return; }
@@ -79,6 +111,7 @@ export default function FlightApp() {
   const listening = useUI((s) => s.listening);
   const [input, setInput] = useState("");
   const logEnd = useRef(null);
+  const lastLogLen = useRef(0);
 
   // The sim advances on its own loop, independent of whichever screen is
   // mounted — see loop.js for why.
@@ -94,7 +127,14 @@ export default function FlightApp() {
       });
       useUI.getState().setNearest(nearestBody());
       useUI.getState().setNav(navList());
-      useUI.getState().setLog(sim.events.slice(-40));
+      // Only publish a new log array (and so only auto-scroll) when an event
+      // actually arrived — sim.events.slice(-40) makes a fresh array every
+      // tick regardless, and re-publishing it unconditionally re-triggered
+      // the scroll-to-bottom effect below 4x/sec, fighting any manual scroll.
+      if (sim.events.length !== lastLogLen.current) {
+        lastLogLen.current = sim.events.length;
+        useUI.getState().setLog(sim.events.slice(-40));
+      }
     }, 250);
     return () => clearInterval(iv);
   }, []);

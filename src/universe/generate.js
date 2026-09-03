@@ -36,6 +36,7 @@ const STAR_COUNT = 160;
 const STRAY_BLACKHOLES = 4;
 const PULSARS = 5;
 const NEBULAE = 6;
+const BEACONS = 7;
 
 // Orbit periods (game-seconds). Galaxy-scale is astronomically slow so the
 // starmap looks fixed; system-scale is fast enough to watch planets move.
@@ -225,6 +226,33 @@ for (let i = 0; i < NEBULAE; i++) {
     mass: 0, size: rand(40, 90),
     orbit: coreOrbit(site),
     scan: "Ionized gas and dust. Sensors degrade sharply inside. Good place to hide — or to be ambushed."
+  });
+}
+
+// --- beacons ------------------------------------------------------------
+// The only artificial emitters in the universe: near-silent on every band
+// except a strong, perfectly-regular Subspace pulse (see signals.js) — the
+// "even spacing, no natural jitter" is the tell that COMMS can pick up on
+// and is why they're worth hunting for with `sweep`.
+const BEACON_NAMES = [
+  "Unregistered Beacon", "Automated Relay", "Derelict Transponder",
+  "Silent Sentinel", "Orphaned Buoy", "Echo Marker", "Drift Transponder"
+];
+const BEACON_HAILS = [
+  "...repeating automated distress pattern. No further data.",
+  "Transponder active. Origin registry unknown. No response beyond acknowledgment.",
+  "Recorded log fragment, heavily degraded: '...if anyone receives this...' Signal ends.",
+  "Standard Starfleet beacon protocol acknowledged. No personnel aboard. Automated only."
+];
+for (let i = 0; i < BEACONS; i++) {
+  const site = spiralSite();
+  objects.push({
+    id: uid("bcn"), name: `${pick(BEACON_NAMES)} ${randInt(10, 99)}`, type: "beacon",
+    parent: core.id, color: "#ffcc55", mass: 0.0005, size: 0.2,
+    orbit: coreOrbit(site),
+    hailable: true,
+    hail: pick(BEACON_HAILS),
+    scan: "Small automated object. Steady subspace pulse at a fixed interval — pattern is artificial, not natural. Origin and purpose unclear."
   });
 }
 
