@@ -12,6 +12,9 @@ import { signalProfile, interpretSignal } from "../universe/signals.js";
 import { startListening, stopListening } from "./commsAudio.js";
 import { useUI } from "./store.js";
 import SignalScope from "./SignalScope.jsx";
+import Spectrogram from "./Spectrogram.jsx";
+import SoundField from "./SoundField.jsx";
+import LoudnessHistory from "./LoudnessHistory.jsx";
 
 const RANGE = 400;
 
@@ -31,6 +34,7 @@ export default function Comms() {
   const listeningToThis = obj && listening?.id === obj.id;
   const interpretation = obj && profile ? interpretSignal(obj, profile) : null;
   const anomalous = obj?.type === "beacon" || (profile?.bands.find((b) => b.name === "Subspace")?.amplitude ?? 0) > 0.5;
+  const dominant = profile?.bands.reduce((a, b) => (b.amplitude > a.amplitude ? b : a)) ?? null;
 
   function toggleListen() {
     if (listeningToThis) stopListening();
@@ -48,12 +52,29 @@ export default function Comms() {
 
       {obj && (
         <div className="comms-body">
-          <div className="comms-scope-panel">
-            <div className="scope-label">
-              <span>OSCILLOSCOPE</span>
-              <span>SPECTRUM 0–~2kHz</span>
+          <div className="comms-main">
+            <div className="comms-scope-panel">
+              <div className="scope-label">
+                <span>OSCILLOSCOPE</span>
+                <span>SPECTRUM 0–~2kHz</span>
+              </div>
+              <SignalScope />
             </div>
-            <SignalScope />
+
+            <div className="comms-sub-panels">
+              <div className="comms-mini-panel">
+                <div className="mini-label">SPECTROGRAM</div>
+                <Spectrogram />
+              </div>
+              <div className="comms-mini-panel comms-mini-square">
+                <div className="mini-label">SOUND FIELD</div>
+                <SoundField />
+              </div>
+              <div className="comms-mini-panel">
+                <div className="mini-label">LOUDNESS HISTORY</div>
+                <LoudnessHistory />
+              </div>
+            </div>
           </div>
 
           <div className="comms-side">
@@ -63,6 +84,13 @@ export default function Comms() {
               <div className="comms-name">{obj.name}</div>
               <div className="comms-type">{[obj.type, obj.starClass, obj.kind].filter(Boolean).join(" — ")}</div>
             </div>
+
+            {dominant && (
+              <div className="comms-dominant">
+                <span className="comms-dominant-label">DOMINANT</span>
+                <span className="comms-dominant-value">{dominant.name.toUpperCase()} {Math.round(dominant.amplitude * 100)}%</span>
+              </div>
+            )}
 
             <div className="comms-bands">
               {profile.bands.map((b, i) => (
