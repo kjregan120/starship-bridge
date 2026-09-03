@@ -248,7 +248,7 @@ for (let i = 0; i < BEACONS; i++) {
   const site = spiralSite();
   objects.push({
     id: uid("bcn"), name: `${pick(BEACON_NAMES)} ${randInt(10, 99)}`, type: "beacon",
-    parent: core.id, color: "#ffcc55", mass: 0.0005, size: 0.2,
+    parent: core.id, color: "#ffcc55", mass: 0.0005, size: 0.3,
     orbit: coreOrbit(site),
     hailable: true,
     hail: pick(BEACON_HAILS),

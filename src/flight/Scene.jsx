@@ -2,7 +2,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Stars } from "@react-three/drei";
 import { useRef, useMemo, useState, useEffect } from "react";
 import * as THREE from "three";
-import { sim, view, galaxyPoints, nearestStar, starsWithin, blackholesWithin, systemBodies, worldPos } from "./engine.js";
+import { sim, view, galaxyPoints, nearestStar, starsWithin, blackholesWithin, beaconsWithin, systemBodies, worldPos } from "./engine.js";
 import { useUI } from "./store.js";
 
 // How far out a star system's planets/moons start rendering as real (if tiny)
@@ -12,6 +12,9 @@ import { useUI } from "./store.js";
 const SYSTEM_RENDER_RANGE = 180;
 // Black holes are rarer and more dramatic — worth spotting from farther out.
 const BLACKHOLE_RENDER_RANGE = 320;
+// Beacons are tiny and meant to be hunted with `sweep` first, then flown to
+// — this only needs to cover final approach, not long-range spotting.
+const BEACON_RENDER_RANGE = 220;
 // Bodies currently drawn as real meshes (by LocalSystem) — GalaxyField skips
 // their flat point so a body doesn't show as both a dot and a sphere at once.
 const renderedBodyIds = new Set();
@@ -144,6 +147,45 @@ function BlackHoleMesh({ obj }) {
   );
 }
 
+// ---- a beacon: small, faceted, artificial-looking — deliberately unlike the
+// smooth spheres every natural body (star/planet/moon) uses, so it reads as
+// "not a rock" at a glance. A wireframe cage plus a light pulsing on its own
+// clock is the visual counterpart to the steady, too-regular Subspace ping
+// that makes it stand out on COMMS (see signals.js/audio.js "beacon").
+function BeaconMesh({ obj }) {
+  const g = useRef();
+  const core = useRef();
+  const r = obj.size || 0.25;
+  useFrame((state, dt) => {
+    if (!g.current) return;
+    const p = rel(worldPos(obj));
+    g.current.position.set(p[0], p[1], p[2]);
+    g.current.rotation.y += dt * 0.6;
+    g.current.rotation.x += dt * 0.25;
+    if (core.current) {
+      const pulse = 0.3 + 0.7 * Math.max(0, Math.sin(state.clock.elapsedTime * 2.2));
+      core.current.material.opacity = pulse;
+    }
+  });
+  return (
+    <group ref={g}>
+      <mesh>
+        <octahedronGeometry args={[r, 0]} />
+        <meshStandardMaterial color={obj.color} metalness={0.85} roughness={0.25} />
+      </mesh>
+      <mesh>
+        <octahedronGeometry args={[r * 1.9, 0]} />
+        <meshBasicMaterial color={obj.color} wireframe transparent opacity={0.5} />
+      </mesh>
+      <mesh ref={core} scale={0.35}>
+        <sphereGeometry args={[r, 8, 8]} />
+        <meshBasicMaterial color="#ffffff" transparent opacity={1} />
+      </mesh>
+      <pointLight color={obj.color} intensity={1} distance={0} decay={0} />
+    </group>
+  );
+}
+
 // ---- the local systems: every star within render range + their planets/moons
 // (not just the single nearest one) so a destination grows in gradually as you
 // approach instead of its whole system popping into existence at the last
@@ -152,15 +194,19 @@ function BlackHoleMesh({ obj }) {
 function LocalSystem() {
   const [starIds, setStarIds] = useState([]);
   const [bhIds, setBhIds] = useState([]);
+  const [beaconIds, setBeaconIds] = useState([]);
   useEffect(() => {
     const tick = () => {
       const nearStars = starsWithin(SYSTEM_RENDER_RANGE);
       const nearBH = blackholesWithin(BLACKHOLE_RENDER_RANGE);
+      const nearBeacons = beaconsWithin(BEACON_RENDER_RANGE);
       setStarIds(nearStars.map((s) => s.id));
       setBhIds(nearBH.map((o) => o.id));
+      setBeaconIds(nearBeacons.map((o) => o.id));
       renderedBodyIds.clear();
       nearStars.forEach((s) => renderedBodyIds.add(s.id));
       nearBH.forEach((o) => renderedBodyIds.add(o.id));
+      nearBeacons.forEach((o) => renderedBodyIds.add(o.id));
       const { star } = nearestStar();
       useUI.getState().setSystemName(star ? star.name : "deep space");
     };
@@ -173,10 +219,12 @@ function LocalSystem() {
     [starIds.join(",")]
   );
   const blackholes = useMemo(() => bhIds.map((id) => sim.byId[id]), [bhIds.join(",")]);
+  const beaconBodies = useMemo(() => beaconIds.map((id) => sim.byId[id]), [beaconIds.join(",")]);
   return (
     <>
       {bodies.map((b) => <BodyMesh key={b.id} obj={b} />)}
       {blackholes.map((b) => <BlackHoleMesh key={b.id} obj={b} />)}
+      {beaconBodies.map((b) => <BeaconMesh key={b.id} obj={b} />)}
     </>
   );
 }

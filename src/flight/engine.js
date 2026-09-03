@@ -10,7 +10,7 @@ export const stars = universe.objects.filter((o) => o.type === "star");
 // Everything that makes up the galaxy-scale point cloud (things you navigate
 // *between*): stars and the exotic bodies, but not planets/moons.
 export const galaxyPoints = universe.objects.filter((o) =>
-  ["star", "blackhole", "pulsar", "nebula"].includes(o.type) && o.id !== "sgr-a-star"
+  ["star", "blackhole", "pulsar", "nebula", "beacon"].includes(o.type) && o.id !== "sgr-a-star"
 );
 
 // Home port: star with the most planets; start holding at its outer planet.
@@ -63,6 +63,19 @@ const blackholes = universe.objects.filter((o) => o.type === "blackhole");
 // same "grow in on approach" treatment as starsWithin.
 export function blackholesWithin(range) {
   return blackholes
+    .map((o) => ({ o, d: dist(sim.pos, positionAt(o, byId, sim.t)) }))
+    .filter(({ d }) => d <= range)
+    .sort((a, b) => a.d - b.d)
+    .map(({ o }) => o);
+}
+
+const beacons = universe.objects.filter((o) => o.type === "beacon");
+
+// Every beacon within `range` — same "grow in on approach" treatment as
+// starsWithin/blackholesWithin, since a beacon belongs to no star system
+// (parent is the galactic core) and would otherwise never render as a mesh.
+export function beaconsWithin(range) {
+  return beacons
     .map((o) => ({ o, d: dist(sim.pos, positionAt(o, byId, sim.t)) }))
     .filter(({ d }) => d <= range)
     .sort((a, b) => a.d - b.d)
