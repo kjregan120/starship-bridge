@@ -3,18 +3,24 @@
 // lets you synthesize/listen to a sonification of it via a live oscilloscope
 // + spectrum analyzer (SignalScope.jsx). Not literal playback — see
 // signals.js/audio.js for why — a stylized stand-in per object type.
+// Two panels read further than the sonification does: EMSpectrum.jsx plots
+// the object on a real log-wavelength axis with a Planck continuum, and
+// WaveField.jsx renders what is currently playing as 3D wavefronts spreading
+// from the source.
 // Playback itself lives in commsAudio.js, not here, so it survives
 // switching to a different station — see the status-bar badge in
 // FlightApp.jsx for the always-visible now-playing indicator/stop control.
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { nearestBody } from "./engine.js";
 import { signalProfile, interpretSignal } from "../universe/signals.js";
 import { startListening, stopListening } from "./commsAudio.js";
 import { useUI } from "./store.js";
 import SignalScope from "./SignalScope.jsx";
 import Spectrogram from "./Spectrogram.jsx";
-import SoundField from "./SoundField.jsx";
+import ContactRadar from "./ContactRadar.jsx";
 import LoudnessHistory from "./LoudnessHistory.jsx";
+import WaveField from "./WaveField.jsx";
+import EMSpectrum from "./EMSpectrum.jsx";
 
 const RANGE = 400;
 
@@ -30,7 +36,11 @@ export default function Comms() {
   }, []);
 
   const obj = nearest?.o ?? null;
-  const profile = obj ? signalProfile(obj) : null;
+  // Keyed on id, not on `obj`: nearestBody() hands back a fresh wrapper every
+  // 500ms tick, and a new profile identity each time would make EMSpectrum
+  // rebuild its Planck curve and WaveField re-derive its spawn rate on every
+  // poll. The profile is a pure function of the object, so this is stable.
+  const profile = useMemo(() => (obj ? signalProfile(obj) : null), [obj?.id]);
   const listeningToThis = obj && listening?.id === obj.id;
   const interpretation = obj && profile ? interpretSignal(obj, profile) : null;
   const anomalous = obj?.type === "beacon" || (profile?.bands.find((b) => b.name === "Subspace")?.amplitude ?? 0) > 0.5;
@@ -61,14 +71,22 @@ export default function Comms() {
               <SignalScope />
             </div>
 
+            <div className="comms-wave-panel">
+              <div className="scope-label">
+                <span>SOUND FIELD · WAVEFRONT PROPAGATION</span>
+                <span>{listeningToThis ? "RECEIVING" : "IDLE — PRESS LISTEN"}</span>
+              </div>
+              <WaveField profile={profile} />
+            </div>
+
             <div className="comms-sub-panels">
               <div className="comms-mini-panel">
                 <div className="mini-label">SPECTROGRAM</div>
                 <Spectrogram />
               </div>
               <div className="comms-mini-panel comms-mini-square">
-                <div className="mini-label">SOUND FIELD</div>
-                <SoundField />
+                <div className="mini-label">CONTACT RADAR</div>
+                <ContactRadar />
               </div>
               <div className="comms-mini-panel">
                 <div className="mini-label">LOUDNESS HISTORY</div>
@@ -92,20 +110,7 @@ export default function Comms() {
               </div>
             )}
 
-            <div className="comms-bands">
-              {profile.bands.map((b, i) => (
-                <div key={b.name} className="comms-band">
-                  <div className="comms-band-track">
-                    <div
-                      className="comms-band-fill"
-                      style={{ height: `${Math.round(b.amplitude * 100)}%`, animationDelay: `${i * 0.3}s`, animationDuration: `${1.4 + b.amplitude}s` }}
-                    />
-                  </div>
-                  <div className="comms-band-label">{b.name}</div>
-                  <div className="comms-band-value">{Math.round(b.amplitude * 100)}%</div>
-                </div>
-              ))}
-            </div>
+            <EMSpectrum obj={obj} profile={profile} />
 
             <button className={`comms-listen ${listeningToThis ? "on" : ""}`} onClick={toggleListen}>
               {listeningToThis ? "◼ STOP" : "▶ LISTEN"}

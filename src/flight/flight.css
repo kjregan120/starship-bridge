@@ -89,7 +89,7 @@
 .comms-range { color: var(--peach, #ffcc99); letter-spacing: 0.05em; text-transform: none; }
 .comms-empty { flex: 1; display: flex; align-items: center; justify-content: center; color: #667; font-family: "Oswald", sans-serif; }
 
-.comms-body { flex: 1; display: grid; grid-template-columns: 1fr 260px; gap: 18px; padding: 18px; min-height: 0; }
+.comms-body { flex: 1; display: grid; grid-template-columns: 1fr 340px; gap: 18px; padding: 18px; min-height: 0; }
 
 .comms-main { display: flex; flex-direction: column; gap: 12px; min-height: 0; min-width: 0; }
 
@@ -103,6 +103,15 @@
 }
 .scope-canvas { width: 100%; height: 100%; flex: 1; min-height: 0; display: block; }
 
+.comms-wave-panel {
+  background: #05070c; border: 1px solid #1c2740; border-radius: 6px; padding: 10px;
+  display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1.15;
+}
+/* The R3F canvas sizes itself from this box, so it needs a real height from
+   flex rather than inheriting an auto one - otherwise it collapses to 0. */
+.wavefield-wrap { flex: 1; min-height: 0; position: relative; border-radius: 3px; overflow: hidden; }
+.wavefield-wrap canvas { display: block; width: 100% !important; height: 100% !important; }
+
 .comms-sub-panels { display: flex; gap: 12px; height: 130px; flex: none; }
 .comms-mini-panel {
   background: #05070c; border: 1px solid #1c2740; border-radius: 6px; padding: 8px;
@@ -112,45 +121,58 @@
 .mini-label {
   font-family: "Oswald", monospace; font-size: 0.62rem; color: #4f7a8f; letter-spacing: 0.12em;
 }
-.spectrogram-canvas, .loudness-history-canvas, .soundfield-canvas {
+.spectrogram-canvas, .loudness-history-canvas, .contact-radar-canvas {
   width: 100%; height: 100%; flex: 1; min-height: 0; display: block; border-radius: 3px;
 }
 
-.comms-side { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; min-width: 0; width: 100%; }
+.comms-side { display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 10px; min-width: 0; width: 100%; overflow-y: auto; }
 .comms-alert {
   font-family: "Oswald", sans-serif; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em;
   color: var(--red, #ff5544); animation: comms-pulse 1s ease-in-out infinite; text-align: center;
 }
 .comms-interpretation {
   font-family: "Oswald", monospace; font-size: 0.72rem; color: #7fd0a0; text-align: left; line-height: 1.4;
-  background: #05070c; border: 1px solid #1c2740; border-radius: 4px; padding: 8px 10px; max-width: 220px;
+  background: #05070c; border: 1px solid #1c2740; border-radius: 4px; padding: 6px 9px; max-width: 260px;
 }
 .comms-target { text-align: center; }
 .comms-name { font-size: 1.3rem; color: var(--peach, #ffcc99); font-weight: 600; }
 .comms-type { font-family: "Oswald", sans-serif; color: #8fa0c0; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.1em; margin-top: 4px; }
 
+/* One row rather than a stacked label/value: the side column now carries the
+   whole EM panel and every reclaimed pixel is headroom for the beacon alert. */
 .comms-dominant {
-  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  display: flex; align-items: baseline; justify-content: center; gap: 8px;
   font-family: "Oswald", sans-serif;
 }
 .comms-dominant-label { font-size: 0.6rem; color: #4f7a8f; letter-spacing: 0.18em; }
-.comms-dominant-value { font-size: 1.15rem; color: #6bffc4; font-weight: 700; letter-spacing: 0.04em; text-shadow: 0 0 8px rgba(107,255,196,0.5); }
+.comms-dominant-value { font-size: 1.05rem; color: #6bffc4; font-weight: 700; letter-spacing: 0.04em; text-shadow: 0 0 8px rgba(107,255,196,0.5); }
 
-.comms-bands { display: flex; gap: 10px; align-items: flex-end; height: 110px; width: 100%; justify-content: center; }
-.comms-band { display: flex; flex-direction: column; align-items: center; gap: 6px; width: 38px; min-width: 0; }
-.comms-band-track { width: 100%; height: 78px; background: #0a0a16; border: 1px solid #1c2740; border-radius: 4px; display: flex; align-items: flex-end; overflow: hidden; }
-.comms-band-fill {
-  width: 100%; transform-origin: bottom; animation: comms-meter-live ease-in-out infinite;
-  background:
-    repeating-linear-gradient(0deg, transparent 0px, transparent 2px, rgba(0,0,0,0.55) 2px, rgba(0,0,0,0.55) 4px),
-    linear-gradient(0deg, #35e07a 0%, #eede45 65%, #ff5544 100%);
+.em-panel {
+  width: 100%; background: #05070c; border: 1px solid #1c2740; border-radius: 6px;
+  padding: 6px; display: flex; flex-direction: column; gap: 5px;
 }
-.comms-band-label { font-family: "Oswald", sans-serif; font-size: 0.6rem; color: #9fb0cc; letter-spacing: 0.02em; text-align: center; }
-.comms-band-value { font-family: "Oswald", sans-serif; font-size: 0.65rem; color: #667; }
-@keyframes comms-meter-live { 0%, 100% { transform: scaleY(1); } 50% { transform: scaleY(0.94); } }
+.em-canvas { width: 100%; height: auto; display: block; border-radius: 3px; }
+.em-lines { display: flex; flex-wrap: wrap; gap: 4px; }
+.em-line-chip {
+  font-family: "Oswald", monospace; font-size: 0.58rem; color: #cfe0ff; letter-spacing: 0.04em;
+  background: #0a0a16; border: 1px solid #1c2740; border-radius: 3px; padding: 1px 4px;
+}
+.em-line-chip em { color: #4f7a8f; font-style: normal; }
+
+.em-nonem-label {
+  font-family: "Oswald", monospace; font-size: 0.58rem; color: #4f7a8f; letter-spacing: 0.14em;
+  border-top: 1px solid #1c2740; padding-top: 5px; margin-top: 1px;
+}
+.em-gauge { display: flex; align-items: center; gap: 8px; font-family: "Oswald", monospace; font-size: 0.62rem; }
+.em-gauge-name { color: #9fb0cc; letter-spacing: 0.08em; width: 34px; flex: none; }
+.em-gauge-track { flex: 1; height: 8px; background: #0a0a16; border: 1px solid #1c2740; border-radius: 3px; overflow: hidden; }
+.em-gauge-fill { display: block; height: 100%; background: linear-gradient(90deg, #2f6f8f, #7fd7ff); }
+/* A subspace reading this high has no natural explanation - see interpretSignal(). */
+.em-gauge-fill.hot { background: linear-gradient(90deg, #8f3a2a, #ff5544); animation: comms-pulse 1s ease-in-out infinite; }
+.em-gauge-value { color: #667; width: 30px; text-align: right; flex: none; }
 
 .comms-listen {
-  border: none; padding: 12px 28px; border-radius: 22px; background: var(--lilac, #cc88ff); color: #000;
+  border: none; padding: 9px 28px; border-radius: 22px; background: var(--lilac, #cc88ff); color: #000;
   font-weight: 700; font-size: 1rem; letter-spacing: 0.1em; cursor: pointer;
 }
 .comms-listen.on { background: var(--red, #ff5544); animation: comms-pulse 1s ease-in-out infinite; }

@@ -1,4 +1,4 @@
-// SoundField.jsx — a live radar/polar scope: every contact within RANGE,
+// ContactRadar.jsx — a live radar/polar scope: every contact within RANGE,
 // plotted by bearing and distance around the ship at the center, with a
 // rotating sweep wedge for that "active sensor" feel. Bearing here uses the
 // same atan2(dz, dx) convention as the sweep command and the nav panel, just
@@ -6,6 +6,11 @@
 // like everything else in signals.js, not literally correct as physical
 // bearing-from-north, but consistent with what the player already reads
 // elsewhere on screen.
+//
+// This was called SoundField until the 3D wavefront display took that name.
+// It never plotted sound - it plots contacts - so the rename is the fix, not
+// the regression; WaveField.jsx is the panel that shows what a signal
+// actually sounds like.
 import { useEffect, useRef } from "react";
 import { nearbyObjects } from "./engine.js";
 
@@ -20,7 +25,7 @@ const TYPE_STYLE = {
   beacon: { r: 3, color: "#ffcc55" }
 };
 
-export default function SoundField() {
+export default function ContactRadar() {
   const canvasRef = useRef(null);
   const contactsRef = useRef([]);
 
@@ -95,5 +100,5 @@ export default function SoundField() {
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  return <canvas ref={canvasRef} width={200} height={200} className="soundfield-canvas" />;
+  return <canvas ref={canvasRef} width={200} height={200} className="contact-radar-canvas" />;
 }
