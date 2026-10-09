@@ -5,6 +5,9 @@
 // chart, so stepping lives here instead of inside either view's render loop.
 import { sim, view } from "./engine.js";
 
+const MAX_BANK = 0.35;     // ~20° roll at most
+const BANK_PER_YAW = 0.45; // rad of roll per rad/s of yaw — full turnRate (π/4) ≈ 20°
+
 export function startSimLoop() {
   let raf;
   let last = performance.now();
@@ -12,8 +15,18 @@ export function startSimLoop() {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
     const scale = sim.mode === "warp" ? 40 : 1; // compress warp into seconds
-    sim.step(dt * scale);
+    const prev = view.facing;
+    sim.step(dt * scale, dt);
     view.facing = sim.facing; // sim.facing is kept unit-length and authoritative in every mode
+    // Bank into turns: yaw rate around galactic up (+ = port), scaled to a
+    // roll angle and eased so a one-frame snap (e.g. warp locking onto a
+    // target) barely registers while a sustained turn leans in fully.
+    if (dt > 0) {
+      const f = view.facing;
+      const yawRate = (prev[2] * f[0] - prev[0] * f[2]) / dt;
+      const target = Math.max(-MAX_BANK, Math.min(MAX_BANK, yawRate * BANK_PER_YAW));
+      view.bank += (target - view.bank) * (1 - Math.exp(-dt * 3));
+    }
     raf = requestAnimationFrame(tick);
   };
   raf = requestAnimationFrame(tick);

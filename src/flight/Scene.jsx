@@ -238,6 +238,7 @@ function Ship() {
     g.current.visible = cam === "chase";
     const f = view.facing;
     g.current.lookAt(f[0], f[1], f[2]);
+    g.current.rotateZ(-view.bank); // object lookAt puts +X on the port wing, so port-down is -Z roll
   });
   return (
     <group ref={g}>
@@ -310,13 +311,18 @@ function CameraRig() {
   useFrame(() => {
     const mode = useUI.getState().camera;
     const f = view.facing;
+    // Roll about the view axis after lookAt (local +Z points back at the
+    // viewer, so + rotates the horizon clockwise = leaning to port). The
+    // chase camera leans only partway — the ship model carries the bank.
     if (mode === "first") {
       camera.position.set(0, 0, 0);
       camera.lookAt(f[0] * 10, f[1] * 10, f[2] * 10);
+      camera.rotateZ(view.bank);
     } else {
       const back = 16, up = 5;
       camera.position.set(-f[0] * back, up - f[1] * back, -f[2] * back);
       camera.lookAt(0, 0, 0);
+      camera.rotateZ(view.bank * 0.4);
     }
   });
   return null;
