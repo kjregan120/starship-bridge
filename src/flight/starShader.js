@@ -15,8 +15,9 @@ import * as THREE from "three";
 // How far the corona reaches, in star radii.
 export const CORONA_EXTENT = 2.6;
 
-// Ashima Arts / Stefan Gustavson 3D simplex noise (MIT).
-const SIMPLEX = /* glsl */ `
+// Ashima Arts / Stefan Gustavson 3D simplex noise (MIT), plus fbm/fbm3.
+// Shared with planetShader.js.
+export const SIMPLEX = /* glsl */ `
 vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
 vec4 mod289(vec4 x){return x-floor(x*(1.0/289.0))*289.0;}
 vec4 permute(vec4 x){return mod289(((x*34.0)+10.0)*x);}
@@ -188,7 +189,7 @@ void main(){
 `;
 
 // Stable per-star seed so neighbouring stars don't share a surface pattern.
-function seedFor(id) {
+export function seedFor(id) {
   let h = 2166136261;
   for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); }
   const f = (k) => (((h >>> k) & 1023) / 1023) * 100;
