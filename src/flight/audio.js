@@ -7,20 +7,55 @@
 
 let ctx = null;
 let analyser = null;
-// Creates the context + shared analyser if needed (cheap — doesn't require a
-// user gesture, only actually resuming/playing does) without resuming it.
+let tuneFilter = null;
+
+// The "tune to a band" receiver filter — one shared BiquadFilter sitting
+// between every playSignal()'s output and the analyser, so tuning is a real
+// change to what's actually playing (and, for free, to everything downstream
+// that reads the analyser: SignalScope, Spectrogram, LoudnessHistory,
+// WaveField all hear the filtered signal without any of them knowing tuning
+// exists). Untuned state is "allpass" — passes every frequency at unity gain,
+// i.e. a true bypass — rather than routing around the node, so playSignal()
+// never needs to know whether tuning is active.
+const BAND_FILTER = {
+  Radio: { freq: 200, Q: 0.8 },       // low, dull — the AM-radio end
+  Microwave: { freq: 600, Q: 1.0 },   // low-mid, a bit more present
+  Elements: { freq: 1400, Q: 0.5 },   // wide and bright — spectral detail
+  Gravimetric: { freq: 90, Q: 0.9 },  // deep sub-bass rumble
+  Subspace: { freq: 2800, Q: 4 }      // thin, narrow, alien whine
+};
+
+// Creates the context + shared analyser/filter if needed (cheap — doesn't
+// require a user gesture, only actually resuming/playing does) without
+// resuming it.
 function ensureCtx() {
   if (!ctx) {
     ctx = new (window.AudioContext || window.webkitAudioContext)();
+    tuneFilter = ctx.createBiquadFilter();
+    tuneFilter.type = "allpass"; // neutral default, see BAND_FILTER comment above
     // Every playSignal() routes through this one shared analyser (not its
     // own), so a scope/spectrum display can read whatever's currently
     // playing without knowing anything about the synth that made it.
     analyser = ctx.createAnalyser();
     analyser.fftSize = 2048;
     analyser.smoothingTimeConstant = 0.75;
+    tuneFilter.connect(analyser);
     analyser.connect(ctx.destination);
   }
   return ctx;
+}
+
+// Tunes the shared receiver filter to one of signals.js's five band names, or
+// clears it back to allpass on any other value (null, "off", a typo — all the
+// same "no filtering" state). Takes effect immediately on whatever's already
+// playing, not just future playSignal() calls.
+export function tuneFilterTo(band) {
+  ensureCtx();
+  const cfg = BAND_FILTER[band];
+  if (!cfg) { tuneFilter.type = "allpass"; return; }
+  tuneFilter.type = "bandpass";
+  tuneFilter.frequency.value = cfg.freq;
+  tuneFilter.Q.value = cfg.Q;
 }
 function getCtx() {
   ensureCtx();
@@ -51,7 +86,7 @@ export function playSignal(profile) {
 
   const out = ac.createGain();
   out.gain.value = 0.0001;
-  out.connect(analyser); // analyser already forwards to destination
+  out.connect(tuneFilter); // tuneFilter -> analyser -> destination (see ensureCtx)
   out.gain.linearRampToValueAtTime(Math.max(0.03, profile.amplitude * 0.25), now + 0.5);
 
   const osc = (type, freq, detune = 0) => {

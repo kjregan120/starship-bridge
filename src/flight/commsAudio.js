@@ -5,6 +5,7 @@
 // what's playing; only this module touches the actual audio nodes.
 import { playSignal } from "./audio.js";
 import { useUI } from "./store.js";
+import { cancelDecode } from "./decodeEngine.js";
 
 let stopFn = null;
 
@@ -18,4 +19,8 @@ export function stopListening() {
   stopFn?.();
   stopFn = null;
   useUI.getState().setListening(null);
+  // A decode can only ever target the channel currently open — closing it
+  // (including startListening()'s own call to this, above, when switching
+  // to a different contact) leaves nothing left to decode.
+  cancelDecode();
 }

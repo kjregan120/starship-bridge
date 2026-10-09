@@ -257,3 +257,69 @@ export function emissionLines(obj, profile) {
       strength: clamp01(elements * (0.45 + seededLine(obj.id, "lstr" + line.nm) * 0.75))
     }));
 }
+
+// ---------------------------------------------------------------------------
+// Decode
+// ---------------------------------------------------------------------------
+// The `decode` command (FlightApp.jsx) runs this once LISTENing to a contact.
+// Only a signal that already reads as artificial actually resolves into a
+// message; everything else times out into one of a few "nothing here" notes.
+// isArtificial() is the same Subspace/beacon threshold Comms.jsx's alert
+// banner and interpretSignal() already use — factored out here so all three
+// agree, after STAR_CLASS_PITCH's key mismatch (see above) turned up from
+// exactly this kind of duplicated-instead-of-shared threshold.
+//
+// Duration is deliberately independent of which branch a given id resolves
+// to (both draw from DECODE_DURATION the same way), so how long an attempt
+// runs never tips off the result before the log line reveals it.
+export function isArtificial(obj, profile) {
+  return obj.type === "beacon" || (profile.bands.find((b) => b.name === "Subspace")?.amplitude ?? 0) > 0.5;
+}
+
+const DECODE_DURATION = [3.2, 5.6]; // seconds, min/max
+
+// Deeper than a beacon's `hail` (generate.js's BEACON_HAILS, fixed at
+// generation time) — decode is a second, distinct read taken live off the
+// signal, so it's computed here from the id rather than stored on the object.
+// {reg}/{sec}/{brg}/{yrs} are filled in per-object below; a template that
+// doesn't use a given placeholder just ignores it.
+const DECODED_MESSAGES = [
+  "REPEATING HEADER: REGISTRY {reg}. AUTOMATED. NO LIFE SIGNS ABOARD AT TIME OF LAST TRANSMISSION.",
+  "LOG FRAGMENT, HEAVILY DEGRADED: \"...hull breach, section {sec}... abandoning...\" — signal ends.",
+  "NAVIGATIONAL WARNING, {reg}: \"...uncharted gravitic anomaly, bearing {brg}°... avoid...\"",
+  "DISTRESS LOOP, {reg}: \"We are not the first to leave this marker. We will not be the last.\"",
+  "MAINTENANCE PING: relay {reg} on backup power. Approximately {yrs} years since last service contact.",
+  "CARGO MANIFEST FRAGMENT, {reg}: contents unlisted. Consignee: unknown. Do not board."
+];
+
+const NO_STRUCTURE_NOTES = [
+  "No structure beneath the noise floor. This reads as natural background emission.",
+  "Signal resolves into nothing but the medium it travels through. No message here.",
+  "Every attempt at demodulation returns noise. There is nothing encoded in this.",
+  "Pattern-matched against every known protocol. No match. This is just noise."
+];
+
+function fmtRegistry(obj) {
+  const n = 1000 + Math.floor(seededLine(obj.id, "decodeReg") * 8999);
+  return `NCC-${n}`;
+}
+
+// { decodable, duration, text } — duration in seconds, text already filled in
+// and ready to log as-is.
+export function decodeMessage(obj, profile) {
+  const decodable = isArtificial(obj, profile);
+  const duration = DECODE_DURATION[0] + seededLine(obj.id, "decodeDuration") * (DECODE_DURATION[1] - DECODE_DURATION[0]);
+
+  if (!decodable) {
+    const note = NO_STRUCTURE_NOTES[Math.floor(seededLine(obj.id, "decodeNote") * NO_STRUCTURE_NOTES.length)];
+    return { decodable, duration, text: note };
+  }
+
+  const template = DECODED_MESSAGES[Math.floor(seededLine(obj.id, "decodeTemplate") * DECODED_MESSAGES.length)];
+  const text = template
+    .replace("{reg}", fmtRegistry(obj))
+    .replace("{sec}", String(1 + Math.floor(seededLine(obj.id, "decodeSec") * 24)))
+    .replace("{brg}", String(Math.floor(seededLine(obj.id, "decodeBrg") * 360)))
+    .replace("{yrs}", String(2 + Math.floor(seededLine(obj.id, "decodeYrs") * 40)));
+  return { decodable, duration, text };
+}

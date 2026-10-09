@@ -125,7 +125,9 @@
   width: 100%; height: 100%; flex: 1; min-height: 0; display: block; border-radius: 3px;
 }
 
-.comms-side { display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 10px; min-width: 0; width: 100%; overflow-y: auto; }
+/* gap kept tight: the worst case (beacon alert + decode bar both showing at
+   once) stacks eight rows in this column, and every px of gap is ×7 there */
+.comms-side { display: flex; flex-direction: column; align-items: center; justify-content: flex-start; gap: 6px; min-width: 0; width: 100%; overflow-y: auto; }
 .comms-alert {
   font-family: "Oswald", sans-serif; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em;
   color: var(--red, #ff5544); animation: comms-pulse 1s ease-in-out infinite; text-align: center;
@@ -152,7 +154,10 @@
   padding: 6px; display: flex; flex-direction: column; gap: 5px;
 }
 .em-canvas { width: 100%; height: auto; display: block; border-radius: 3px; }
-.em-lines { display: flex; flex-wrap: wrap; gap: 4px; }
+/* Set by the `tune` command — see EMSpectrum.jsx's header row and the long
+   comment in signals.js on why the receiver filter is band-wide, not per-object. */
+.em-tuned-flag { color: var(--lilac, #cc88ff); }
+.em-lines { display: flex; flex-wrap: wrap; gap: 4px; transition: opacity 0.2s; }
 .em-line-chip {
   font-family: "Oswald", monospace; font-size: 0.58rem; color: #cfe0ff; letter-spacing: 0.04em;
   background: #0a0a16; border: 1px solid #1c2740; border-radius: 3px; padding: 1px 4px;
@@ -163,7 +168,7 @@
   font-family: "Oswald", monospace; font-size: 0.58rem; color: #4f7a8f; letter-spacing: 0.14em;
   border-top: 1px solid #1c2740; padding-top: 5px; margin-top: 1px;
 }
-.em-gauge { display: flex; align-items: center; gap: 8px; font-family: "Oswald", monospace; font-size: 0.62rem; }
+.em-gauge { display: flex; align-items: center; gap: 8px; font-family: "Oswald", monospace; font-size: 0.62rem; transition: opacity 0.2s; }
 .em-gauge-name { color: #9fb0cc; letter-spacing: 0.08em; width: 34px; flex: none; }
 .em-gauge-track { flex: 1; height: 8px; background: #0a0a16; border: 1px solid #1c2740; border-radius: 3px; overflow: hidden; }
 .em-gauge-fill { display: block; height: 100%; background: linear-gradient(90deg, #2f6f8f, #7fd7ff); }
@@ -177,6 +182,25 @@
 }
 .comms-listen.on { background: var(--red, #ff5544); animation: comms-pulse 1s ease-in-out infinite; }
 @keyframes comms-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+
+/* `decode` progress — a CSS-driven fill (animationDuration set inline from
+   decodeMessage()'s duration) rather than a JS-ticked percentage, matching
+   how .comms-band-fill etc. already animate elsewhere on this screen. */
+.comms-decode { display: flex; align-items: center; gap: 8px; width: 100%; }
+.comms-decode-label {
+  font-family: "Oswald", monospace; font-size: 0.62rem; color: #cc88ff; letter-spacing: 0.06em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 108px;
+}
+.comms-decode-track {
+  flex: 1; height: 8px; background: #0a0a16; border: 1px solid #1c2740; border-radius: 3px;
+  overflow: hidden; display: block;
+}
+.comms-decode-fill {
+  display: block; height: 100%; width: 0%; background: linear-gradient(90deg, #6f3a8f, #cc88ff);
+  animation-name: comms-decode-fill; animation-timing-function: linear; animation-fill-mode: forwards;
+}
+@keyframes comms-decode-fill { from { width: 0%; } to { width: 100%; } }
+.comms-decode-inline { color: #cc88ff; font-weight: 600; }
 .comms-note { font-family: "Oswald", sans-serif; font-size: 0.75rem; color: #667; text-transform: capitalize; text-align: center; }
 .comms-elsewhere {
   font-family: "Oswald", sans-serif; font-size: 0.72rem; color: #8fa0c0;

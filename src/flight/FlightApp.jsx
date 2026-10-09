@@ -4,8 +4,10 @@ import Chart from "./Chart.jsx";
 import Comms from "./Comms.jsx";
 import { useUI } from "./store.js";
 import { stopListening } from "./commsAudio.js";
-import { sim, navList, nearestBody, nearbyObjects, startBodyName } from "./engine.js";
-import { signalProfile } from "../universe/signals.js";
+import { sim, navList, nearestBody, nearbyObjects, startBodyName, byId } from "./engine.js";
+import { signalProfile, decodeMessage } from "../universe/signals.js";
+import { tuneFilterTo } from "./audio.js";
+import { startDecode, abortDecode } from "./decodeEngine.js";
 import { startSimLoop } from "./loop.js";
 import "./flight.css";
 
@@ -24,7 +26,7 @@ const STATION_HELP = {
   conn: "CONN — ahead full|half|quarter · reverse full|half|quarter · port|starboard <degrees> · all stop · come about for <name> · warp <1-3> to <name> · warp <1-3> · warp <1-3> route · drop out",
   science: "SCIENCE — scan · nav · status. External view for visual inspection of the nearest contact.",
   tactical: "TACTICAL — 3D chart. Drag to rotate, scroll to zoom, right-drag to pan. Shows any plotted course.",
-  comms: "COMMS — auto-monitors the nearest contact's signal bands. Press LISTEN to hear a sonification of it. sweep for every contact in range · hail <name> to open a channel."
+  comms: "COMMS — auto-monitors the nearest contact's signal bands. Press LISTEN to hear a sonification of it. sweep for every contact in range · hail <name> to open a channel · tune <radio|microwave|elements|gravimetric|subspace> to filter toward one band, tune off to clear · decode to attempt to pull a message off the open channel (LISTEN first), decode stop to abort."
 };
 
 const SWEEP_RANGE = 1500;
@@ -68,6 +70,53 @@ function handleCommand(text) {
     });
     return;
   }
+  // Detune ("tune off"/"untune") before the band-name match below, since
+  // "off" would otherwise need its own slot in that alternation for no
+  // benefit — this is the one case with no band name to capitalize.
+  if (/^(?:tune\s+off|untune)$/.test(t)) {
+    useUI.getState().setTunedBand(null);
+    tuneFilterTo(null);
+    sim.log("info", "Receiver detuned.");
+    return;
+  }
+  if ((m = t.match(/^tune\s+(radio|microwave|elements|gravimetric|subspace)$/))) {
+    // signals.js's band names are exactly Title-cased ("Radio", "Gravimetric",
+    // ...) — matches profile.bands[].name so EMSpectrum's dim/highlight can
+    // compare it directly with no lookup table of its own.
+    const band = m[1][0].toUpperCase() + m[1].slice(1);
+    // Typing the same band again detunes, the way a second press of a toggle
+    // does elsewhere in this game (LISTEN is the other example).
+    if (useUI.getState().tunedBand === band) {
+      useUI.getState().setTunedBand(null);
+      tuneFilterTo(null);
+      sim.log("info", "Receiver detuned.");
+    } else {
+      useUI.getState().setTunedBand(band);
+      tuneFilterTo(band);
+      sim.log("info", `Tuned to ${band} band.`);
+    }
+    return;
+  }
+
+  if (/^(?:decode\s+stop|cancel\s+decode)$/.test(t)) {
+    if (!abortDecode()) sim.log("info", "Nothing being decoded.");
+    return;
+  }
+  if (/^decode$/.test(t)) {
+    // Decode only ever targets the channel already open — there is no
+    // "decode <name>" form, unlike hail/tune, because there is nothing to
+    // decode until LISTEN has a channel running to attempt it on.
+    const listening = useUI.getState().listening;
+    if (!listening) { sim.log("deny", "No channel open. LISTEN to a contact before attempting to decode it."); return; }
+    if (useUI.getState().decoding?.id === listening.id) { sim.log("info", `Already decoding ${listening.name}...`); return; }
+    const obj = byId[listening.id];
+    if (!obj) { sim.log("deny", "Contact lost. Decode aborted."); return; } // defensive; shouldn't happen
+    const result = decodeMessage(obj, signalProfile(obj));
+    startDecode(obj.id, obj.name, result);
+    sim.log("info", `Attempting to decode ${obj.name}...`);
+    return;
+  }
+
   if ((m = t.match(/^hail(?:\s+(.+))?$/))) {
     const query = m[1]?.trim().toLowerCase();
     const body = query

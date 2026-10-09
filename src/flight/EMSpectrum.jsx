@@ -20,6 +20,13 @@
 // Gravimetric and Subspace are not electromagnetic and deliberately have no
 // place on the axis — they are reported underneath as separate gauges. See the
 // long comment in signals.js for why that omission is the point.
+//
+// `tunedBand` (one of profile.bands[].name, or null) is the `tune` command's
+// state (FlightApp.jsx/store.js) — it dims every region *except* the tuned
+// one, so the highlight always shows which band the receiver is actually
+// filtering toward. The thermal continuum is deliberately exempt: it isn't
+// one of the five tunable bands, it's a separate physical model laid over
+// them, so it stays fully visible no matter what's tuned.
 import { useEffect, useMemo, useRef } from "react";
 import { EM_BANDS, emissionTemperature, planckRadiance, wienPeak, emissionLines } from "../universe/signals.js";
 
@@ -60,7 +67,11 @@ function formatLambda(m) {
   return `${(m * 1e12).toFixed(0)}pm`;
 }
 
-export default function EMSpectrum({ obj, profile }) {
+// Alpha for every region except the tuned one. Full brightness (1) when
+// nothing is tuned.
+const DIM_ALPHA = 0.22;
+
+export default function EMSpectrum({ obj, profile, tunedBand = null }) {
   const canvasRef = useRef(null);
   // memoized so its identity doesn't restart the draw loop on every poll tick
   const lines = useMemo(() => emissionLines(obj, profile), [obj.id, profile]);
@@ -77,6 +88,7 @@ export default function EMSpectrum({ obj, profile }) {
     const T = emissionTemperature(obj);
     const peak = wienPeak(T);
     const bandAmp = (n) => profile.bands.find((b) => b.name === n)?.amplitude ?? 0;
+    const alphaFor = (name) => (!tunedBand || tunedBand === name ? 1 : DIM_ALPHA);
 
     // log10(wavelength in m) -> x. Long wavelengths on the left, the way every
     // textbook EM chart is drawn.
@@ -151,8 +163,12 @@ export default function EMSpectrum({ obj, profile }) {
       };
       // a slow breath so the panel reads as a live instrument, not a diagram
       const breathe = 1 + Math.sin(t / 900) * 0.03;
+      g.save(); g.globalAlpha = alphaFor("Radio");
       hump(1e2, 1e-1, bandAmp("Radio") * breathe, "#6bffc4");
+      g.restore();
+      g.save(); g.globalAlpha = alphaFor("Microwave");
       hump(1e-1, 1e-3, bandAmp("Microwave") * (2 - breathe), "#7fd7ff");
+      g.restore();
 
       // thermal continuum
       if (curve) {
@@ -179,6 +195,7 @@ export default function EMSpectrum({ obj, profile }) {
 
       // element lines on the main axis — a single dense smear, which is the
       // honest picture at this scale; the inset below is where they resolve
+      g.save(); g.globalAlpha = alphaFor("Elements");
       lines.forEach((line) => {
         const px = x(line.nm * 1e-9);
         g.strokeStyle = "rgba(255,255,255,0.5)"; g.lineWidth = 0.7;
@@ -186,6 +203,7 @@ export default function EMSpectrum({ obj, profile }) {
         // is to say "there is line structure in here" — the inset is the readout
         g.beginPath(); g.moveTo(px, baseY); g.lineTo(px, baseY - line.strength * plotH * 0.45); g.stroke();
       });
+      g.restore();
 
       g.strokeStyle = "rgba(140,190,255,0.3)"; g.lineWidth = 1;
       g.beginPath(); g.moveTo(padL, baseY); g.lineTo(W - padR, baseY); g.stroke();
@@ -200,6 +218,9 @@ export default function EMSpectrum({ obj, profile }) {
       });
 
       // ---- zoom callout: that sliver, expanded ------------------------------
+      // The whole inset is Elements' territory, same as the main-axis lines
+      // above — one alpha for the pair rather than repeating alphaFor() calls.
+      g.save(); g.globalAlpha = alphaFor("Elements");
       const vx0 = x(VIS_HI * 1e-9), vx1 = x(VIS_LO * 1e-9);
       g.fillStyle = "rgba(255,255,255,0.06)";
       g.beginPath();
@@ -246,6 +267,7 @@ export default function EMSpectrum({ obj, profile }) {
       g.textAlign = "left"; g.fillText("380nm", padL, insetBot + 10);
       g.textAlign = "center"; g.fillText("VISIBLE — EMISSION LINES", W / 2, insetBot + 10);
       g.textAlign = "right"; g.fillText("780nm", W - padR, insetBot + 10);
+      g.restore();
 
       if (!T && lines.length === 0 && bandAmp("Radio") < 0.05 && bandAmp("Microwave") < 0.05) {
         g.fillStyle = "rgba(255,85,68,0.9)"; g.font = "10px Oswald, monospace"; g.textAlign = "center";
@@ -255,7 +277,7 @@ export default function EMSpectrum({ obj, profile }) {
     }
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [obj.id, profile, lines]);
+  }, [obj.id, profile, lines, tunedBand]);
 
   const nonEM = ["Gravimetric", "Subspace"].map((name) => ({
     name,
@@ -268,10 +290,15 @@ export default function EMSpectrum({ obj, profile }) {
 
   return (
     <div className="em-panel">
-      <div className="mini-label">EM SPECTRUM · λ</div>
+      <div className="scope-label">
+        <span>EM SPECTRUM · λ</span>
+        <span className={tunedBand ? "em-tuned-flag" : ""}>
+          {tunedBand ? `TUNED · ${tunedBand.toUpperCase()}` : "UNTUNED"}
+        </span>
+      </div>
       <canvas ref={canvasRef} width={W * SCALE} height={H * SCALE} className="em-canvas" />
       {named.length > 0 && (
-        <div className="em-lines">
+        <div className="em-lines" style={{ opacity: !tunedBand || tunedBand === "Elements" ? 1 : DIM_ALPHA }}>
           {named.map((line) => (
             <span key={line.el + line.nm} className="em-line-chip">
               {line.el} <em>{line.nm.toFixed(1)}</em>
@@ -281,7 +308,11 @@ export default function EMSpectrum({ obj, profile }) {
       )}
       <div className="em-nonem-label">NON-ELECTROMAGNETIC</div>
       {nonEM.map((b) => (
-        <div key={b.name} className="em-gauge">
+        <div
+          key={b.name}
+          className="em-gauge"
+          style={{ opacity: !tunedBand || tunedBand === b.name ? 1 : DIM_ALPHA }}
+        >
           <span className="em-gauge-name">{b.name.slice(0, 4).toUpperCase()}</span>
           <span className="em-gauge-track">
             <span
