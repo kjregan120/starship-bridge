@@ -42,6 +42,11 @@ export class FlightSim {
     this.waypoints = [];       // bends plotted around hazards, flown before `heading`
     this.warpFactor = 2;
     this.facing = [0, 0, 1];   // ship's nose, kept even when stopped — see _impulseStep
+    // Max rate the nose swings (rad per real second). Thrust still steers
+    // along the desired direction; only the nose (and so the viewscreen)
+    // lags, so a come-about sweeps the view around instead of snapping.
+    this.turnRate = opts.turnRate ?? Math.PI / 4;
+    this.pendingTurn = 0;      // signed radians of manual yaw still to swing through — see turn()
     this.events = [];
   }
 
@@ -88,7 +93,7 @@ export class FlightSim {
   // ---------------- orders ----------------
   allStop() {
     this.mode = "impulse"; this.throttle = 0; this.thrustSign = 1;
-    this.heading = null; this.waypoints = [];
+    this.heading = null; this.waypoints = []; this.pendingTurn = 0;
     this.log("order", "All stop.");
   }
   ahead(frac) {
@@ -111,7 +116,7 @@ export class FlightSim {
     const o = this.find(q);
     if (!o) { this.log("deny", `No contact matching "${q}".`); return false; }
     const route = this._planWaypoints(this.posOf(o.id), new Set([o.id]));
-    this.heading = { type: "body", id: o.id };
+    this.heading = { type: "body", id: o.id }; this.pendingTurn = 0;
     this.mode = "impulse";
     if (this.throttle === 0) this.throttle = 0.6;
     this.log("order", route.bent
@@ -121,7 +126,7 @@ export class FlightSim {
   }
   steerToPoint(p) {
     const route = this._planWaypoints(p, new Set());
-    this.heading = { type: "point", p }; this.mode = "impulse";
+    this.heading = { type: "point", p }; this.pendingTurn = 0; this.mode = "impulse";
     if (this.throttle === 0) this.throttle = 0.6;
     this.log("order", route.bent
       ? `Helm, new heading laid in — course plotted clear of ${route.hazards[0].body.name}.`
@@ -129,19 +134,17 @@ export class FlightSim {
   }
   // Manual helm: yaw the nose left (port) or right (starboard) by `degrees`,
   // around the galaxy's up axis (Y) — the galaxy is a thin disk, so this is
-  // the turn you actually want. Momentum turns with the nose (this.vel is
-  // rotated too) so a turn sticks instead of being overwritten the instant
-  // forward thrust resumes chasing the old velocity direction. Cancels any
-  // heading lock, same as reverse — manual helm overrides the autopilot.
+  // the turn you actually want. The yaw is queued and swung through at
+  // turnRate (see _manualTurnStep); successive orders add up. Momentum turns
+  // with the nose (this.vel is rotated too) so a turn sticks instead of being
+  // overwritten the instant forward thrust resumes chasing the old velocity
+  // direction. Cancels any heading lock, same as reverse — manual helm
+  // overrides the autopilot.
   turn(dir, degrees) {
     const deg = Math.max(0, degrees || 0);
     if (deg === 0) return;
     const sign = dir === "port" ? -1 : 1;
-    const rad = (Math.PI / 180) * deg * sign;
-    const cos = Math.cos(rad), sin = Math.sin(rad);
-    const rotY = ([x, y, z]) => [x * cos - z * sin, y, x * sin + z * cos];
-    this.facing = unit(rotY(this.facing));
-    this.vel = rotY(this.vel);
+    this.pendingTurn += (Math.PI / 180) * deg * sign;
     this.heading = null; this.waypoints = [];
     this.log("order", `Helm, ${dir} ${Math.round(deg)} degrees.`);
   }
@@ -165,7 +168,7 @@ export class FlightSim {
     }
     this.mode = "warp"; this.warpFactor = f; this.waypoints = [];
     if (o) {
-      this.heading = { type: "body", id: o.id };
+      this.heading = { type: "body", id: o.id }; this.pendingTurn = 0;
       this.log("order", `Course laid in for ${o.name}. Warp ${f}, engage.`);
     } else {
       this.heading = null;
@@ -190,7 +193,7 @@ export class FlightSim {
         `Recommend impulse power to clear.`);
       return false;
     }
-    this.mode = "warp"; this.warpFactor = f;
+    this.mode = "warp"; this.warpFactor = f; this.pendingTurn = 0;
     this.log("order", this.waypoints.length
       ? `Helm, take the plotted course. Warp ${f}, engage — ${this.waypoints.length} bend${this.waypoints.length > 1 ? "s" : ""} ahead.`
       : `Helm, take the plotted course. Warp ${f}, engage.`);
@@ -211,10 +214,45 @@ export class FlightSim {
   }
 
   // ---------------- simulation ----------------
-  step(dt) {
+  // `realDt` is wall-clock time when the caller compresses sim time (warp runs
+  // 40x in loop.js) — nose rotation is paced in real seconds so a turn at
+  // warp sweeps at the same visible rate as one at impulse.
+  step(dt, realDt = dt) {
     this.t += dt;
+    this._manualTurnStep(realDt);
     if (this.mode === "warp") this._warpStep(dt);
     else this._impulseStep(dt);
+  }
+
+  // Swings the nose through whatever manual yaw turn() has queued, at most
+  // turnRate per real second, carrying momentum around with it.
+  _manualTurnStep(realDt) {
+    if (!this.pendingTurn) return;
+    const max = this.turnRate * realDt;
+    const rad = Math.abs(this.pendingTurn) <= max ? this.pendingTurn : Math.sign(this.pendingTurn) * max;
+    this.pendingTurn -= rad;
+    if (Math.abs(this.pendingTurn) < 1e-9) this.pendingTurn = 0;
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    const rotY = ([x, y, z]) => [x * cos - z * sin, y, x * sin + z * cos];
+    this.facing = unit(rotY(this.facing));
+    this.vel = rotY(this.vel);
+  }
+
+  // Rotates the nose toward `want` (unit) by at most turnRate*dt — a slerp
+  // about their common perpendicular, falling back to the galactic up axis
+  // when they're (anti)parallel.
+  _turnToward(want, dt) {
+    const f = this.facing;
+    const d = Math.max(-1, Math.min(1, f[0] * want[0] + f[1] * want[1] + f[2] * want[2]));
+    const ang = Math.acos(d);
+    const max = this.turnRate * dt;
+    if (ang <= max || ang < 1e-6) { this.facing = want; return; }
+    let axis = [f[1] * want[2] - f[2] * want[1], f[2] * want[0] - f[0] * want[2], f[0] * want[1] - f[1] * want[0]];
+    if (magnitude(axis) < 1e-6) axis = [0, 1, 0];
+    const k = unit(axis), c = Math.cos(max), s = Math.sin(max);
+    const kxf = [k[1] * f[2] - k[2] * f[1], k[2] * f[0] - k[0] * f[2], k[0] * f[1] - k[1] * f[0]];
+    const kdf = k[0] * f[0] + k[1] * f[1] + k[2] * f[2];
+    this.facing = unit([0, 1, 2].map((i) => f[i] * c + kxf[i] * s + k[i] * kdf * (1 - c)));
   }
 
   // Warp shares _resolveTarget() with impulse, so "take this course at warp"
@@ -344,7 +382,7 @@ export class FlightSim {
 
     if (t) {
       dir = unit(sub(t.point, this.pos));
-      this.facing = dir;
+      this._turnToward(dir, dt);
     } else if (this.throttle > 0 && this.thrustSign < 0) {
       // Reverse thrusters: push opposite the nose regardless of current
       // drift, and leave facing alone — the ship backs away without
@@ -358,7 +396,7 @@ export class FlightSim {
       // instead of letting "ahead full" actually pull you away from a hazard.
       const speed = magnitude(this.vel);
       dir = speed > 0.05 ? unit(this.vel) : this.facing;
-      this.facing = dir;
+      this._turnToward(dir, dt);
     }
 
     // station-keeping: no order, no throttle -> hold position (thrusters win)

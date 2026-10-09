@@ -4,6 +4,8 @@ import { useRef, useMemo, useState, useEffect } from "react";
 import * as THREE from "three";
 import { sim, view, galaxyPoints, nearestStar, starsWithin, blackholesWithin, beaconsWithin, systemBodies, worldPos } from "./engine.js";
 import { useUI } from "./store.js";
+import { makeStarMaterials, CORONA_EXTENT } from "./starShader.js";
+import { makePlanetParts } from "./planetShader.js";
 
 // How far out a star system's planets/moons start rendering as real (if tiny)
 // spheres, instead of only appearing once that star becomes THE nearest one.
@@ -63,33 +65,82 @@ function GalaxyField() {
 }
 
 // ---- one body in the local system (floating-origin, self-updating) ---------
+// Planets and moons: procedural surface per `kind`, plus clouds, atmosphere
+// glow and rings where the kind calls for them (planetShader.js). The outer
+// group only moves; the tilt group sets the axis; only the spheres spin, so
+// rings and the atmosphere shell don't wobble with the body's rotation.
+const starOf = (obj) => { let o = obj; while (o && o.type !== "star") o = sim.byId[o.parent]; return o; };
+const _center = new THREE.Vector3(), _sun = new THREE.Vector3();
 function BodyMesh({ obj }) {
   const g = useRef();
-  const isStar = obj.type === "star";
-  const isDerelict = obj.type === "derelict";
-  useFrame((_, dt) => {
+  const spin = useRef();
+  const cloudSpin = useRef();
+  const r = obj.size || 0.5;
+  const star = useMemo(() => starOf(obj), [obj.id]);
+  const parts = useMemo(() => makePlanetParts(obj, star), [obj.id]);
+  useEffect(() => () => parts.dispose(), [parts]);
+  useFrame((state, dt) => {
+    if (!g.current) return;
+    const p = rel(worldPos(obj));
+    g.current.position.set(p[0], p[1], p[2]);
+    if (spin.current) spin.current.rotation.y += dt * 0.05;
+    if (cloudSpin.current) cloudSpin.current.rotation.y += dt * 0.065;
+    _center.set(p[0], p[1], p[2]);
+    if (star) { const s = rel(worldPos(star)); _sun.set(s[0], s[1], s[2]); }
+    parts.tick(state.clock.elapsedTime, _center, _sun);
+  });
+  const segs = parts.segments;
+  return (
+    <group ref={g}>
+      <group rotation={[0, 0, parts.tilt]}>
+        <mesh ref={spin} material={parts.surface}>
+          <sphereGeometry args={[r, segs, segs]} />
+        </mesh>
+        {parts.clouds && (
+          <mesh ref={cloudSpin} material={parts.clouds} scale={1.015}>
+            <sphereGeometry args={[r, 64, 64]} />
+          </mesh>
+        )}
+        {parts.rings && (
+          <mesh material={parts.rings.material} rotation={[-Math.PI / 2, 0, 0]}>
+            <ringGeometry args={[parts.rings.inner, parts.rings.outer, 128, 1]} />
+          </mesh>
+        )}
+      </group>
+      {parts.atmosphere && (
+        <mesh material={parts.atmosphere} scale={parts.atmoExtent}>
+          <sphereGeometry args={[r, 32, 32]} />
+        </mesh>
+      )}
+    </group>
+  );
+}
+
+// ---- a star: churning plasma surface + streaming corona (starShader.js) -----
+function StarMesh({ obj }) {
+  const g = useRef();
+  const r = obj.size || 1;
+  const mats = useMemo(() => makeStarMaterials(obj), [obj.id]);
+  useEffect(() => () => { mats.surface.dispose(); mats.corona.dispose(); }, [mats]);
+  useFrame((state, dt) => {
     if (!g.current) return;
     const p = rel(worldPos(obj));
     g.current.position.set(p[0], p[1], p[2]);
     g.current.rotation.y += dt * 0.05;
+    const t = state.clock.elapsedTime;
+    mats.surface.uniforms.uTime.value = t;
+    mats.corona.uniforms.uTime.value = t;
+    mats.corona.uniforms.uCenter.value.set(p[0], p[1], p[2]);
   });
   return (
     <group ref={g}>
-      <mesh>
-        <sphereGeometry args={[obj.size || 0.5, 32, 32]} />
-        {isStar ? (
-          <meshBasicMaterial color={obj.color} />
-        ) : (
-          <meshStandardMaterial color={obj.color} roughness={0.85} metalness={isDerelict ? 0.6 : 0.05} />
-        )}
+      <mesh material={mats.surface}>
+        <sphereGeometry args={[r, 64, 64]} />
       </mesh>
-      {isStar && <pointLight color={obj.color} intensity={2.4} distance={0} decay={0} />}
-      {isStar && (
-        <mesh scale={1.4}>
-          <sphereGeometry args={[obj.size || 1, 24, 24]} />
-          <meshBasicMaterial color={obj.color} transparent opacity={0.12} blending={THREE.AdditiveBlending} depthWrite={false} />
-        </mesh>
-      )}
+      <mesh material={mats.corona} scale={CORONA_EXTENT}>
+        <sphereGeometry args={[r, 32, 32]} />
+      </mesh>
+      <pointLight color={obj.color} intensity={2.4} distance={0} decay={0} />
     </group>
   );
 }
@@ -222,7 +273,7 @@ function LocalSystem() {
   const beaconBodies = useMemo(() => beaconIds.map((id) => sim.byId[id]), [beaconIds.join(",")]);
   return (
     <>
-      {bodies.map((b) => <BodyMesh key={b.id} obj={b} />)}
+      {bodies.map((b) => b.type === "star" ? <StarMesh key={b.id} obj={b} /> : <BodyMesh key={b.id} obj={b} />)}
       {blackholes.map((b) => <BlackHoleMesh key={b.id} obj={b} />)}
       {beaconBodies.map((b) => <BeaconMesh key={b.id} obj={b} />)}
     </>
@@ -238,6 +289,7 @@ function Ship() {
     g.current.visible = cam === "chase";
     const f = view.facing;
     g.current.lookAt(f[0], f[1], f[2]);
+    g.current.rotateZ(-view.bank); // object lookAt puts +X on the port wing, so port-down is -Z roll
   });
   return (
     <group ref={g}>
@@ -310,13 +362,18 @@ function CameraRig() {
   useFrame(() => {
     const mode = useUI.getState().camera;
     const f = view.facing;
+    // Roll about the view axis after lookAt (local +Z points back at the
+    // viewer, so + rotates the horizon clockwise = leaning to port). The
+    // chase camera leans only partway — the ship model carries the bank.
     if (mode === "first") {
       camera.position.set(0, 0, 0);
       camera.lookAt(f[0] * 10, f[1] * 10, f[2] * 10);
+      camera.rotateZ(view.bank);
     } else {
       const back = 16, up = 5;
       camera.position.set(-f[0] * back, up - f[1] * back, -f[2] * back);
       camera.lookAt(0, 0, 0);
+      camera.rotateZ(view.bank * 0.4);
     }
   });
   return null;

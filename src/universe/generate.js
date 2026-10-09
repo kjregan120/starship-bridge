@@ -136,12 +136,15 @@ function addPlanets(star) {
     const moons = kind.kind === "gas giant" ? randInt(0, 3) : randInt(0, 1);
     let mR = planet.size + rand(1.5, 3);
     for (let m = 0; m < moons; m++) {
+      const id = uid("m");
+      const mk = moonKind(id, kind.kind);
       objects.push({
-        id: uid("m"),
+        id,
         name: `${planet.name}${String.fromCharCode(97 + m)}`,
         type: "moon",
         parent: planet.id,
-        color: "#8a8f99",
+        kind: mk.kind,
+        color: mk.color,
         mass: rand(0.0002, 0.0009),
         size: rand(0.15, 0.35),
         orbit: {
@@ -150,12 +153,32 @@ function addPlanets(star) {
           phase: rand(0, TAU),
           inclination: rand(-0.3, 0.3)
         },
-        scan: "Airless moon. Cratered surface."
+        scan: mk.scan
       });
       mR += rand(1, 2.5);
     }
     orbitR += rand(5, 16);
   }
+}
+
+// Moon kind is hashed from the moon's id rather than drawn from rng(), so
+// adding it didn't shift the random stream — the same seed still produces
+// the exact same universe it did before moons had kinds. Volcanic moons
+// only orbit gas giants: tidal heating from a massive parent (Io).
+const MOON_KINDS = {
+  cratered: { color: "#8a8f99", scan: "Airless moon. Cratered surface." },
+  icy: { color: "#d6e4ee", scan: "Icy moon. Fractured water-ice crust. Possible subsurface ocean." },
+  volcanic: { color: "#d9b84a", scan: "Volcanic moon. Tidal heating from its parent drives constant eruptions. Sulfur plains." }
+};
+function moonKind(id, parentKind) {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); }
+  // murmur3 finalizer — bare FNV of short sequential ids ("m-3", "m-4"…)
+  // leaves the high bits clumped, which skewed the kind split badly.
+  h ^= h >>> 16; h = Math.imul(h, 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16;
+  const u = (h >>> 0) / 4294967296;
+  const kind = parentKind === "gas giant" && u < 0.2 ? "volcanic" : u < 0.45 ? "icy" : "cratered";
+  return { kind, ...MOON_KINDS[kind] };
 }
 
 function describePlanet(kind) {

@@ -31,8 +31,9 @@ export { universe };
 // The ship's rendered facing direction — the single source of truth for
 // "which way am I pointed," shared by the viewscreen/chase camera (Scene.jsx)
 // and the tactical chart (Chart.jsx) so they never disagree. Updated once per
-// frame in Scene.jsx's Ticker.
-export const view = { facing: [0, 0, 1] };
+// frame in loop.js. `bank` is the roll (radians, + = rolling to port) the
+// scene leans into while the nose is yawing — see loop.js.
+export const view = { facing: [0, 0, 1], bank: 0 };
 
 const dist = (a, b) => magnitude([a[0] - b[0], a[1] - b[1], a[2] - b[2]]);
 
