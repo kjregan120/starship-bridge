@@ -4,6 +4,7 @@ import { useRef, useMemo, useState, useEffect } from "react";
 import * as THREE from "three";
 import { sim, view, galaxyPoints, nearestStar, starsWithin, blackholesWithin, beaconsWithin, systemBodies, worldPos } from "./engine.js";
 import { useUI } from "./store.js";
+import { makeStarMaterials, CORONA_EXTENT } from "./starShader.js";
 
 // How far out a star system's planets/moons start rendering as real (if tiny)
 // spheres, instead of only appearing once that star becomes THE nearest one.
@@ -65,7 +66,6 @@ function GalaxyField() {
 // ---- one body in the local system (floating-origin, self-updating) ---------
 function BodyMesh({ obj }) {
   const g = useRef();
-  const isStar = obj.type === "star";
   const isDerelict = obj.type === "derelict";
   useFrame((_, dt) => {
     if (!g.current) return;
@@ -77,19 +77,37 @@ function BodyMesh({ obj }) {
     <group ref={g}>
       <mesh>
         <sphereGeometry args={[obj.size || 0.5, 32, 32]} />
-        {isStar ? (
-          <meshBasicMaterial color={obj.color} />
-        ) : (
-          <meshStandardMaterial color={obj.color} roughness={0.85} metalness={isDerelict ? 0.6 : 0.05} />
-        )}
+        <meshStandardMaterial color={obj.color} roughness={0.85} metalness={isDerelict ? 0.6 : 0.05} />
       </mesh>
-      {isStar && <pointLight color={obj.color} intensity={2.4} distance={0} decay={0} />}
-      {isStar && (
-        <mesh scale={1.4}>
-          <sphereGeometry args={[obj.size || 1, 24, 24]} />
-          <meshBasicMaterial color={obj.color} transparent opacity={0.12} blending={THREE.AdditiveBlending} depthWrite={false} />
-        </mesh>
-      )}
+    </group>
+  );
+}
+
+// ---- a star: churning plasma surface + streaming corona (starShader.js) -----
+function StarMesh({ obj }) {
+  const g = useRef();
+  const r = obj.size || 1;
+  const mats = useMemo(() => makeStarMaterials(obj), [obj.id]);
+  useEffect(() => () => { mats.surface.dispose(); mats.corona.dispose(); }, [mats]);
+  useFrame((state, dt) => {
+    if (!g.current) return;
+    const p = rel(worldPos(obj));
+    g.current.position.set(p[0], p[1], p[2]);
+    g.current.rotation.y += dt * 0.05;
+    const t = state.clock.elapsedTime;
+    mats.surface.uniforms.uTime.value = t;
+    mats.corona.uniforms.uTime.value = t;
+    mats.corona.uniforms.uCenter.value.set(p[0], p[1], p[2]);
+  });
+  return (
+    <group ref={g}>
+      <mesh material={mats.surface}>
+        <sphereGeometry args={[r, 64, 64]} />
+      </mesh>
+      <mesh material={mats.corona} scale={CORONA_EXTENT}>
+        <sphereGeometry args={[r, 32, 32]} />
+      </mesh>
+      <pointLight color={obj.color} intensity={2.4} distance={0} decay={0} />
     </group>
   );
 }
@@ -222,7 +240,7 @@ function LocalSystem() {
   const beaconBodies = useMemo(() => beaconIds.map((id) => sim.byId[id]), [beaconIds.join(",")]);
   return (
     <>
-      {bodies.map((b) => <BodyMesh key={b.id} obj={b} />)}
+      {bodies.map((b) => b.type === "star" ? <StarMesh key={b.id} obj={b} /> : <BodyMesh key={b.id} obj={b} />)}
       {blackholes.map((b) => <BlackHoleMesh key={b.id} obj={b} />)}
       {beaconBodies.map((b) => <BeaconMesh key={b.id} obj={b} />)}
     </>
