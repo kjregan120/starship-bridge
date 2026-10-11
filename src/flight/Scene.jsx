@@ -319,31 +319,6 @@ function Ejecta() {
   return <points geometry={ejecta.geometry} material={ejecta.material} frustumCulled={false} />;
 }
 
-// ---- the ship (chase view only) --------------------------------------------
-function Ship() {
-  const g = useRef();
-  useFrame(() => {
-    if (!g.current) return;
-    const cam = useUI.getState().camera;
-    g.current.visible = cam === "chase";
-    const f = view.facing;
-    g.current.lookAt(f[0], f[1], f[2]);
-    g.current.rotateZ(-view.bank); // object lookAt puts +X on the port wing, so port-down is -Z roll
-  });
-  return (
-    <group ref={g}>
-      <mesh rotation={[Math.PI / 2, 0, 0]}>
-        <coneGeometry args={[0.5, 2, 12]} />
-        <meshStandardMaterial color="#cfd6e0" metalness={0.7} roughness={0.35} />
-      </mesh>
-      <mesh position={[0, 0, -0.6]}>
-        <boxGeometry args={[2.2, 0.25, 0.7]} />
-        <meshStandardMaterial color="#9aa4b2" metalness={0.6} roughness={0.4} />
-      </mesh>
-    </group>
-  );
-}
-
 // ---- warp streaks ----------------------------------------------------------
 // Streaks travel along local +z in their own frame; the wrapping group is
 // rotated each frame so that local +z tracks view.facing, keeping the streak
@@ -395,25 +370,16 @@ function WarpStreaks() {
   );
 }
 
-// ---- camera rig: first-person at the ship, or chase behind it --------------
+// ---- camera rig: first-person at the ship --------------------------------
 function CameraRig() {
   const { camera } = useThree();
   useFrame(() => {
-    const mode = useUI.getState().camera;
     const f = view.facing;
     // Roll about the view axis after lookAt (local +Z points back at the
-    // viewer, so + rotates the horizon clockwise = leaning to port). The
-    // chase camera leans only partway — the ship model carries the bank.
-    if (mode === "first") {
-      camera.position.set(0, 0, 0);
-      camera.lookAt(f[0] * 10, f[1] * 10, f[2] * 10);
-      camera.rotateZ(view.bank);
-    } else {
-      const back = 16, up = 5;
-      camera.position.set(-f[0] * back, up - f[1] * back, -f[2] * back);
-      camera.lookAt(0, 0, 0);
-      camera.rotateZ(view.bank * 0.4);
-    }
+    // viewer, so + rotates the horizon clockwise = leaning to port).
+    camera.position.set(0, 0, 0);
+    camera.lookAt(f[0] * 10, f[1] * 10, f[2] * 10);
+    camera.rotateZ(view.bank);
   });
   return null;
 }
@@ -428,7 +394,6 @@ export default function Scene() {
       <GalaxyField />
       <LocalSystem />
       <Ejecta />
-      <Ship />
       <WarpStreaks />
     </Canvas>
   );

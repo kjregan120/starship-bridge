@@ -3,6 +3,7 @@
 import universe from "../universe/universe.json";
 import { FlightSim } from "../universe/sim.js";
 import { positionAt, magnitude } from "../universe/physics.js";
+import { ShipSystems, fluxAt } from "../universe/ship.js";
 
 export const byId = Object.fromEntries(universe.objects.map((o) => [o.id, o]));
 export const stars = universe.objects.filter((o) => o.type === "star");
@@ -26,10 +27,20 @@ export const sim = new FlightSim(universe, {
   maxWarp: 3
 });
 export const startBodyName = (homePlanet || homeStar).name;
+
+// The ship's own condition (ship.js), stepped alongside the sim in loop.js.
+// Its warnings go to the same log as the helm's.
+export const ship = new ShipSystems({ onEvent: (kind, msg) => sim.log(kind, msg) });
+
+// Everything that heats or irradiates the ship: stars, pulsars, black holes.
+const fluxSources = universe.objects.filter((o) => ["star", "pulsar", "blackhole"].includes(o.type));
+export function shipFlux() {
+  return fluxAt(sim.pos, fluxSources, (o) => positionAt(o, byId, sim.t));
+}
 export { universe };
 
 // The ship's rendered facing direction — the single source of truth for
-// "which way am I pointed," shared by the viewscreen/chase camera (Scene.jsx)
+// "which way am I pointed," shared by the viewscreen (Scene.jsx)
 // and the tactical chart (Chart.jsx) so they never disagree. Updated once per
 // frame in loop.js. `bank` is the roll (radians, + = rolling to port) the
 // scene leans into while the nose is yawing — see loop.js.
