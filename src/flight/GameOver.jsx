@@ -53,7 +53,7 @@ export default function GameOver() {
               {fallen.map((m) => (
                 <div key={m.id} className="gameover-line">
                   <span className="gameover-t">{mmss(m.diedAt)}</span> {m.rank} {m.name}
-                  <span className="gameover-dept"> · {DEPARTMENTS[m.dept].label}</span>
+                  <span className="gameover-dept"> · {DEPARTMENTS[m.homeDept ?? m.dept].label}{m.family ? ` · leaves ${m.family}` : ""}</span>
                 </div>
               ))}
             </div>

@@ -23,6 +23,8 @@ export const useUI = create((set) => ({
   // Runs a typed order — set by FlightApp.jsx so a panel (the dashboard's
   // recommended-action chips) can issue one without owning the parser.
   runOrder: null,
+  // Whose personnel file is open on the CREW screen (a profile id) | null.
+  personnelId: null,
   // Which contact COMMS is currently sonifying, if any — { id, name } | null.
   // Lives here (not in Comms.jsx's own state) so playback survives switching
   // to a different station; commsAudio.js owns the actual audio nodes.
@@ -54,6 +56,7 @@ export const useUI = create((set) => ({
   setShip: (ship) => set({ ship }),
   setAlert: (alert) => set({ alert }),
   setRunOrder: (runOrder) => set({ runOrder }),
+  setPersonnel: (personnelId) => set({ personnelId }),
   setListening: (listening) => set({ listening }),
   setTunedBand: (tunedBand) => set({ tunedBand }),
   setDecoding: (decoding) => set({ decoding })

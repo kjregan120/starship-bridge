@@ -75,7 +75,9 @@ const clamp01 = (x) => Math.max(0, Math.min(1, x));
 export class ShipSystems {
   constructor(opts = {}) {
     this.onEvent = opts.onEvent ?? (() => {});
-    this.roster = new Roster(opts.seed);
+    // The crew: from the career's personnel files when there is one
+    // (opts.profiles, opts.day), else a fresh crew from opts.seed.
+    this.roster = new Roster(opts.profiles ?? opts.seed, opts.day);
     this.time = 0;           // mission time, real seconds
     // Component health — 0 is destroyed. Nothing repairs itself yet.
     this.health = {

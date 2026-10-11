@@ -10,6 +10,7 @@
 // visuals all read the same list, so they never disagree about what matters.
 
 import { DEPARTMENTS, DEPT_ORDER, causeWords, spokenRank } from "./crew.js";
+import { PRONOUNS } from "./personnel/profile.js";
 
 const pct = (x) => `${Math.round(x * 100)} percent`;
 export function fmtEta(s) {
@@ -326,7 +327,9 @@ export class AlertBoard {
 function casualtyReport(deaths, roster) {
   const parts = ["Casualty report."];
   const who = (m) => `${spokenRank(m.rank)} ${m.name}, ${DEPARTMENTS[m.dept].label}`;
-  if (deaths.length === 1) parts.push(`${who(deaths[0].m)}, has died.`);
+  // One death gets the person: who they leave behind.
+  const leaves = (m) => m.family ? ` ${PRONOUNS[m.pronouns].Sub} ${m.pronouns === "they" ? "leave" : "leaves"} behind ${m.family}.` : "";
+  if (deaths.length === 1) parts.push(`${who(deaths[0].m)}, has died.${leaves(deaths[0].m)}`);
   else if (deaths.length === 2) parts.push(`${who(deaths[0].m)}, and ${who(deaths[1].m)}, have died.`);
   else if (deaths.length > 2) {
     const bySec = {};
