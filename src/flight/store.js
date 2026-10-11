@@ -9,13 +9,20 @@ export const useUI = create((set) => ({
   nav: [],
   systemName: "",
   log: [],
-  // Station picks the screen: conn = forward viewscreen, science = external
-  // (chase) view for visual inspection, tactical = the 3D chart, comms = the
-  // signal-detection/sonification screen. `camera` is just Scene.jsx's own
-  // first/chase sub-mode, kept in sync with station rather than switched
-  // independently — orders still all work no matter which is selected.
+  // Station picks the screen: conn = forward viewscreen, science = the
+  // ship-status dashboard, tactical = the 3D chart, comms = the
+  // signal-detection/sonification screen. Orders still all work no matter
+  // which is selected.
   station: "conn", // "conn" | "science" | "tactical" | "comms"
-  camera: "first", // "first" | "chase" — derived from station, see setStation
+  // The ship's systems (ship.js snapshot()), refreshed with the rest — null
+  // until the first tick.
+  ship: null,
+  // The alert condition (alerts.js AlertBoard): level, threats worst first,
+  // and the incident log the game-over screen replays.
+  alert: { level: "green", threats: [], incidents: [] },
+  // Runs a typed order — set by FlightApp.jsx so a panel (the dashboard's
+  // recommended-action chips) can issue one without owning the parser.
+  runOrder: null,
   // Which contact COMMS is currently sonifying, if any — { id, name } | null.
   // Lives here (not in Comms.jsx's own state) so playback survives switching
   // to a different station; commsAudio.js owns the actual audio nodes.
@@ -43,7 +50,10 @@ export const useUI = create((set) => ({
   setNav: (nav) => set({ nav }),
   setSystemName: (systemName) => set({ systemName }),
   setLog: (log) => set({ log: [...log] }),
-  setStation: (station) => set({ station, camera: station === "science" ? "chase" : "first" }),
+  setStation: (station) => set({ station }),
+  setShip: (ship) => set({ ship }),
+  setAlert: (alert) => set({ alert }),
+  setRunOrder: (runOrder) => set({ runOrder }),
   setListening: (listening) => set({ listening }),
   setTunedBand: (tunedBand) => set({ tunedBand }),
   setDecoding: (decoding) => set({ decoding })

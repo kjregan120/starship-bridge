@@ -47,6 +47,12 @@ export class FlightSim {
     // lags, so a come-about sweeps the view around instead of snapping.
     this.turnRate = opts.turnRate ?? Math.PI / 4;
     this.pendingTurn = 0;      // signed radians of manual yaw still to swing through — see turn()
+    // Set from outside by the ship's systems (ship.js): the fraction of
+    // impulse thrust actually available, the highest warp factor the coils
+    // will hold, and why warp is off-line (null when it isn't).
+    this.impulseFactor = 1;
+    this.warpLimit = this.maxWarp;
+    this.warpInhibit = null;
     this.events = [];
   }
 
@@ -153,12 +159,13 @@ export class FlightSim {
   // Without one: just engage and hold the current heading, cruising forward
   // indefinitely until given another order.
   engageWarp(q, factor) {
-    const f = Math.max(1, Math.min(this.maxWarp, Math.round(factor || 2)));
+    const f = this._warpFactorFor(factor);
     let o = null;
     if (q) {
       o = this.find(q);
       if (!o) { this.log("deny", `No such destination "${q}".`); return false; }
     }
+    if (this.warpInhibit) { this.log("deny", `Unable to engage warp — ${this.warpInhibit}.`); return false; }
     const chk = canWarp(this.pos, this.objects, this.byId, positionAt, this.t, this.cfg);
     if (!chk.ok) {
       this.log("deny",
@@ -185,7 +192,8 @@ export class FlightSim {
       this.log("deny", "No course plotted to take at warp. Come about for a destination first.");
       return false;
     }
-    const f = Math.max(1, Math.min(this.maxWarp, Math.round(factor || 2)));
+    const f = this._warpFactorFor(factor);
+    if (this.warpInhibit) { this.log("deny", `Unable to engage warp — ${this.warpInhibit}.`); return false; }
     const chk = canWarp(this.pos, this.objects, this.byId, positionAt, this.t, this.cfg);
     if (!chk.ok) {
       this.log("deny",
@@ -199,6 +207,21 @@ export class FlightSim {
       : `Helm, take the plotted course. Warp ${f}, engage.`);
     return true;
   }
+  // The ordered factor, held to the configured cap and to what damaged coils
+  // can sustain — logged when the coils are the reason it's lower.
+  _warpFactorFor(factor) {
+    const asked = Math.max(1, Math.min(this.maxWarp, Math.round(factor || 2)));
+    const f = Math.max(1, Math.min(asked, this.warpLimit));
+    if (f < asked) this.log("info", `Warp coils damaged — warp ${f} is the best they'll hold.`);
+    return f;
+  }
+  // Ship's systems pulled the plug (reactor scram, field starved of power).
+  forceDropOut(reason) {
+    if (this.mode !== "warp") return;
+    this.mode = "impulse"; this.throttle = 0;
+    this.heading = null; this.waypoints = [];
+    this.log("deny", `Warp field collapse — ${reason}. Dropped to impulse.`);
+  }
   dropOut() {
     if (this.mode === "warp") {
       this.mode = "impulse"; this.throttle = 0;
@@ -210,7 +233,7 @@ export class FlightSim {
   // Silent check — true if warp could engage from here. Lets the UI light up a
   // "ready" indicator without spamming denial messages.
   canEngageWarp() {
-    return canWarp(this.pos, this.objects, this.byId, positionAt, this.t, this.cfg).ok;
+    return !this.warpInhibit && canWarp(this.pos, this.objects, this.byId, positionAt, this.t, this.cfg).ok;
   }
 
   // ---------------- simulation ----------------
@@ -408,7 +431,7 @@ export class FlightSim {
 
     // steer velocity toward the desired velocity at finite accel; gravity is a
     // perturbation on top — strong wells still bend the path (slingshot-ish).
-    const desiredVel = scale(dir, this.throttle * this.cfg.impulseMax);
+    const desiredVel = scale(dir, this.throttle * this.impulseFactor * this.cfg.impulseMax);
     const dv = sub(desiredVel, this.vel);
     const steer = this._clampMag(dv, this.cfg.impulseAccel * dt);
     const grav = gravityOnShip(this.pos, this.objects, this.byId, this.t, this.cfg).accel;
