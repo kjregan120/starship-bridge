@@ -14,6 +14,8 @@ import * as THREE from "three";
 
 // How far the corona reaches, in star radii.
 export const CORONA_EXTENT = 2.6;
+// Loop slots per star (flareLoops.js); each can light a flare on the surface.
+export const FLARE_SLOTS = 10;
 
 // Ashima Arts / Stefan Gustavson 3D simplex noise (MIT), plus fbm/fbm3.
 // Shared with planetShader.js.
@@ -91,6 +93,10 @@ const surfaceFragment = /* glsl */ `
 uniform vec3 uColor;
 uniform float uTime;
 uniform vec3 uSeed;
+// Erupting loops (flareLoops.js): footpoints A and B in object space, with
+// brightness in A.w and the loop's angular span in B.w.
+uniform vec4 uFlareA[${FLARE_SLOTS}];
+uniform vec4 uFlareB[${FLARE_SLOTS}];
 varying vec3 vObjPos;
 varying vec3 vNormalV;
 varying vec3 vViewPos;
@@ -138,6 +144,27 @@ void main(){
   col *= 0.45 + 0.55 * pow(mu, 0.5);
   col = mix(col * cool / max(uColor, vec3(0.05)) * 1.8, col, smoothstep(0.0, 0.45, mu));
 
+  // Flares: two bright ragged ribbons, one at each footpoint of a snapping
+  // loop, lying across the loop's axis, over a softer haze between them.
+  // After limb darkening, so a flare near the edge still blazes.
+  float flash = 0.0;
+  for (int i = 0; i < ${FLARE_SLOTS}; i++) {
+    float f = uFlareA[i].w;
+    if (f <= 0.0) continue;
+    vec3 a = uFlareA[i].xyz, b = uFlareB[i].xyz;
+    float s = uFlareB[i].w * 0.3;
+    vec3 ax = normalize(a - b);
+    vec3 qa = vObjPos - a, qb = vObjPos - b;
+    float la = dot(qa, ax), lb = dot(qb, ax);
+    float ca = length(qa - ax * la), cb = length(qb - ax * lb);
+    float rib = exp(-(la*la) / (s*s*0.08) - (ca*ca) / (s*s*1.5))
+              + exp(-(lb*lb) / (s*s*0.08) - (cb*cb) / (s*s*1.5));
+    rib *= 0.55 + 0.6 * snoise(vObjPos * 24.0 + uSeed + vec3(float(i)));
+    float haze = exp(-2.0 * (1.0 - dot(vObjPos, normalize(a + b))) / (s*s*4.0)) * 0.3;
+    flash += f * max(rib + haze, 0.0);
+  }
+  col = mix(col, vec3(2.2), clamp(flash, 0.0, 0.95)) + hot * flash * 1.2;
+
   // Not tone-mapped (see makeStarMaterials): ACES desaturates bright colour
   // toward white, which flattened pale stars into a cream disc.
   gl_FragColor = vec4(col, 1.0);
@@ -161,6 +188,8 @@ uniform float uRadius;   // star's world radius
 uniform float uExtent;   // corona reaches out to uRadius * uExtent
 uniform vec3 uCenter;    // star centre, world space
 uniform vec3 uSeed;
+// Erupting loops: world-space direction of each loop's centre, brightness in w.
+uniform vec4 uFlareW[${FLARE_SLOTS}];
 varying vec3 vWorldPos;
 ${SIMPLEX}
 void main(){
@@ -179,8 +208,15 @@ void main(){
   float n2 = snoise(dir * 9.0 + uSeed + vec3(uTime*0.15));
   float streak = 0.65 + 0.45*n + 0.15*n2;
 
-  float glow = exp(-x * 5.5) * (1.0 - x) * streak;
-  float inner = exp(-x * 22.0) * 0.8;               // bright thin rim right at the edge
+  // A flare near the limb lights up the corona above it.
+  float boost = 0.0;
+  for (int i = 0; i < ${FLARE_SLOTS}; i++) {
+    if (uFlareW[i].w <= 0.0) continue;
+    boost += uFlareW[i].w * pow(max(dot(dir, uFlareW[i].xyz), 0.0), 10.0);
+  }
+
+  float glow = exp(-x * 5.5) * (1.0 - x) * streak * (1.0 + 6.0 * boost);
+  float inner = exp(-x * 22.0) * 0.8 * (1.0 + 4.0 * boost);   // bright thin rim right at the edge
   vec3 col = mix(uColor, vec3(1.0), 0.35) * (glow + inner);
   gl_FragColor = vec4(col, 1.0);
   #include <tonemapping_fragment>
@@ -199,8 +235,12 @@ export function seedFor(id) {
 export function makeStarMaterials(obj) {
   const color = new THREE.Color(obj.color || "#ffffff");
   const seed = seedFor(obj.id);
+  const flares = () => Array.from({ length: FLARE_SLOTS }, () => new THREE.Vector4());
   const surface = new THREE.ShaderMaterial({
-    uniforms: { uColor: { value: color }, uTime: { value: 0 }, uSeed: { value: seed } },
+    uniforms: {
+      uColor: { value: color }, uTime: { value: 0 }, uSeed: { value: seed },
+      uFlareA: { value: flares() }, uFlareB: { value: flares() },
+    },
     vertexShader: surfaceVertex,
     fragmentShader: surfaceFragment,
     toneMapped: false,
@@ -210,6 +250,7 @@ export function makeStarMaterials(obj) {
       uColor: { value: color }, uTime: { value: 0 }, uSeed: { value: seed },
       uRadius: { value: obj.size || 1 }, uExtent: { value: CORONA_EXTENT },
       uCenter: { value: new THREE.Vector3() },
+      uFlareW: { value: flares() },
     },
     vertexShader: coronaVertex,
     fragmentShader: coronaFragment,

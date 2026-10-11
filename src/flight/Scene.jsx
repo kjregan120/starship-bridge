@@ -5,6 +5,8 @@ import * as THREE from "three";
 import { sim, view, galaxyPoints, nearestStar, starsWithin, blackholesWithin, beaconsWithin, systemBodies, worldPos } from "./engine.js";
 import { useUI } from "./store.js";
 import { makeStarMaterials, CORONA_EXTENT } from "./starShader.js";
+import { makeFlareLoops } from "./flareLoops.js";
+import { ejecta } from "./ejecta.js";
 import { makePlanetParts } from "./planetShader.js";
 
 // How far out a star system's planets/moons start rendering as real (if tiny)
@@ -116,14 +118,36 @@ function BodyMesh({ obj }) {
   );
 }
 
-// ---- a star: churning plasma surface + streaming corona (starShader.js) -----
+// ---- a star: churning plasma surface + streaming corona (starShader.js),
+// with coronal loops rising off the surface, some erupting (flareLoops.js) and
+// throwing off clouds that travel on after the star is out of range (Ejecta) -
+const _starCenter = new THREE.Vector3();
 function StarMesh({ obj }) {
   const g = useRef();
   const r = obj.size || 1;
   const mats = useMemo(() => makeStarMaterials(obj), [obj.id]);
+  const loops = useMemo(() => makeFlareLoops(obj, mats), [mats]);
   useEffect(() => () => { mats.surface.dispose(); mats.corona.dispose(); }, [mats]);
+  useEffect(() => () => loops.dispose(), [loops]);
+  const clock = useRef(0);
+  useEffect(() => {
+    // Launch from the torn apex, in absolute world space: the cloud is the
+    // shared pool's from here on, not this star's.
+    loops.onBurst = (d, span, height, giant) => {
+      const c = worldPos(obj), lift = r * (1 + height);
+      ejecta.launch({
+        t: clock.current,
+        at: [c[0] + d.x * lift, c[1] + d.y * lift, c[2] + d.z * lift],
+        d, radius: r, color: obj.color,
+        cone: Math.min(0.8, 0.15 + span * 0.9),
+        speed: (giant ? 5 + Math.random() * 3 : 2.5 + Math.random() * 2.5),
+      });
+    };
+    return () => { loops.onBurst = null; };
+  }, [loops]);
   useFrame((state, dt) => {
     if (!g.current) return;
+    clock.current = state.clock.elapsedTime;
     const p = rel(worldPos(obj));
     g.current.position.set(p[0], p[1], p[2]);
     g.current.rotation.y += dt * 0.05;
@@ -131,12 +155,15 @@ function StarMesh({ obj }) {
     mats.surface.uniforms.uTime.value = t;
     mats.corona.uniforms.uTime.value = t;
     mats.corona.uniforms.uCenter.value.set(p[0], p[1], p[2]);
+    loops.tick(t, _starCenter.set(p[0], p[1], p[2]), g.current.quaternion);
   });
   return (
     <group ref={g}>
       <mesh material={mats.surface}>
         <sphereGeometry args={[r, 64, 64]} />
       </mesh>
+      {/* bent in the vertex shader, so three's bounds don't know where it is */}
+      <mesh geometry={loops.geometry} material={loops.material} scale={r} frustumCulled={false} />
       <mesh material={mats.corona} scale={CORONA_EXTENT}>
         <sphereGeometry args={[r, 32, 32]} />
       </mesh>
@@ -280,6 +307,18 @@ function LocalSystem() {
   );
 }
 
+// ---- coronal mass ejections from every star, one shared pool (ejecta.js) ---
+function Ejecta() {
+  const { size, camera } = useThree();
+  useFrame((state) => {
+    // gl_PointSize is in device pixels, `size` in CSS pixels.
+    const pxScale = (size.height * state.gl.getPixelRatio()) / (2 * Math.tan((camera.fov * Math.PI) / 360));
+    ejecta.tick(state.clock.elapsedTime, sim.pos, pxScale);
+  });
+  // Placed per particle in the vertex shader, so three's bounds are meaningless.
+  return <points geometry={ejecta.geometry} material={ejecta.material} frustumCulled={false} />;
+}
+
 // ---- the ship (chase view only) --------------------------------------------
 function Ship() {
   const g = useRef();
@@ -388,6 +427,7 @@ export default function Scene() {
       <Stars radius={200} depth={80} count={2000} factor={5} fade speed={0.1} />
       <GalaxyField />
       <LocalSystem />
+      <Ejecta />
       <Ship />
       <WarpStreaks />
     </Canvas>
