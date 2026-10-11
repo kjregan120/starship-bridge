@@ -1,20 +1,30 @@
-// crew.js — the forty people aboard, one at a time.
+// crew.js — the forty people aboard, one at a time, during a mission.
 //
 // Pure logic, testable in node, owned and stepped by ShipSystems (ship.js).
+// Who these people are — names, skills, age, medical history, family —
+// lives in their personnel files (personnel/profile.js), which persist from
+// mission to mission (personnel/career.js). The roster is the mission-time
+// view of them: built from the profiles at launch, tracking health, dose
+// and location as things happen, and checkpointed back into the career.
+//
 // Each crew member has a department, a duty station in one of the hull
-// sections, their own health, radiation dose and toughness, and a location:
+// sections, and a location:
 //   station  — at their post in their department's section
 //   sickbay  — being treated (starboard section)
 //   shelter  — in the shielded core, off duty
 // What hurts the crew is worked out per person from where they are: a
 // breach kills the people in that section first, engineering takes the
-// reactor's heat, the shelter cuts radiation to a quarter.
+// reactor's heat, the shelter cuts radiation to 15%.
 //
-// Staffing feeds back into the ship: each department's share of fit crew at
-// their posts sets how well its system runs (staffing()). Nobody at a post
-// isn't zero — the ship's automation keeps things ticking at 40%.
+// Staffing feeds back into the ship: each department's fit crew at their
+// posts, weighted by skill in the department's core skill, sets how well
+// its system runs (staffing()). A veteran is worth more than a new ensign.
+// Nobody at a post isn't zero — automation keeps things ticking at 40%.
 //
 // You (the captain) aren't on the roster.
+
+import { newCareer, crewProfiles } from "./personnel/career.js";
+import { fullName, toughness, skillLevel, CORE_SKILL, currentDept, familySummary } from "./personnel/profile.js";
 
 export const DEPARTMENTS = {
   command:     { label: "Command",     section: "fore",      size: 3,  system: null,      effect: "Chain of command" },
@@ -30,83 +40,36 @@ export const DEPARTMENTS = {
 export const DEPT_ORDER = Object.keys(DEPARTMENTS);
 const SICKBAY = "starboard";
 const AUTOMATION = 0.4;             // what a system manages with nobody at its post
+const STAFFING_MAX = 1.15;          // a department of veterans runs a little better than spec
 
-// Rank ladders per department, most senior first.
-const RANKS = {
-  command: ["Commander", "Lt. Commander", "Lieutenant"],
-  default: ["Lieutenant", "Lieutenant", "Lt. (jg)", "Ensign", "Ensign", "Chief", "Petty Officer", "Petty Officer", "Crewman", "Crewman"],
-  medical: ["Doctor", "Doctor", "Nurse", "Medic"],
-};
-const ROLE = {
-  command: ["First Officer", "Second Officer", "Operations Officer"],
-  helm: ["Helm Officer", "Navigator", "Relief Pilot"],
-  science: ["Science Officer", "Sensor Analyst", "Astrophysicist", "Sensor Technician", "Lab Technician"],
-  comms: ["Comms Officer", "Signals Analyst", "Linguist"],
-  engineering: ["Chief Engineer", "Reactor Specialist", "Warp Specialist", "Engineer", "Engineer", "Engineer", "Plasma Technician", "Thermal Technician", "Technician", "Technician"],
-  tactical: ["Tactical Officer", "Shield Specialist", "Emitter Technician", "Tactical Specialist"],
-  security: ["Security Chief", "Security Officer", "Security Officer"],
-  medical: ["Chief Medical Officer", "Physician", "Nurse", "Medic"],
-  operations: ["Life Support Officer", "Environmental Engineer", "Ops Specialist", "Ops Technician", "Ops Technician"],
-};
-const FIRST = [
-  "Amara", "Theo", "Yuki", "Rafael", "Ingrid", "Kwame", "Priya", "Mateo", "Sasha", "Elif", "Jonah", "Leilani", "Dmitri",
-  "Noor", "Kofi", "Mei", "Tomas", "Aaliyah", "Bjorn", "Zara", "Hiro", "Camila", "Idris", "Freya", "Ravi", "Nadia",
-  "Oren", "Thandiwe", "Lucas", "Saoirse", "Emeka", "Ana", "Kenji", "Marisol", "Arjun", "Wren", "Tariq", "Ilse",
-  "Joaquin", "Asha", "Niko", "Halima", "Felix", "Rosa", "Desmond", "Sun-hee",
-];
-const LAST = [
-  "Okafor", "Reyes", "Tanaka", "Lindqvist", "Mensah", "Patel", "Novak", "Haddad", "Castillo", "Volkov", "Nakamura",
-  "Adeyemi", "Fischer", "Moreau", "Kowalski", "Osei", "Ibrahim", "Sato", "Delgado", "O'Brien", "Zhang", "Kaur",
-  "Abara", "Petrov", "Silva", "Holm", "Mbeki", "Duarte", "Kim", "Rahman", "Vega", "Achebe", "Larsen", "Quinn",
-  "Takahashi", "Nwosu", "Ortiz", "Brennan", "Yilmaz", "Aziz", "Park", "Mwangi", "Sorensen", "Farouk",
-];
+// What one person at their post contributes, by skill level 0–5 in the
+// department's core skill: an untrained hand 0.7, proficient (3) 1.0,
+// a master 1.2.
+const skillWeight = (level) => 0.7 + 0.1 * level;
 
-// Seeded so a test (or a replay) gets the same crew; a new mission passes
-// a fresh seed.
-function rng(seed) {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+// The mission-time record for one person, from their profile.
+function memberFrom(p, day) {
+  const dept = currentDept(p);
+  const health = p.medical.health ?? 1;
+  return {
+    id: p.id,
+    name: fullName(p),
+    rank: p.post.rank,
+    role: p.post.role,
+    dept,
+    homeDept: p.post.dept,
+    section: DEPARTMENTS[dept].section,
+    toughness: toughness(p, day),
+    priorDose: p.medical.lifetimeDoseSv,
+    pronouns: p.identity.pronouns,
+    family: familySummary(p),
+    profile: p,                 // the file itself — skills are read from it live
+    health,
+    dose: 0,
+    location: "station",
+    diedAt: null,
+    cause: null,
   };
-}
-
-export function generateCrew(seed = Date.now()) {
-  const r = rng(seed);
-  // Shuffle both lists and deal them out, so no two crew share a first or
-  // a last name.
-  const shuffle = (a) => {
-    const b = a.slice();
-    for (let i = b.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [b[i], b[j]] = [b[j], b[i]]; }
-    return b;
-  };
-  const firsts = shuffle(FIRST), lasts = shuffle(LAST);
-  let k = 0;
-  const name = () => { const n = `${firsts[k]} ${lasts[k]}`; k++; return n; };
-  const crew = [];
-  for (const dept of DEPT_ORDER) {
-    const d = DEPARTMENTS[dept];
-    const ranks = RANKS[dept] ?? RANKS.default;
-    for (let i = 0; i < d.size; i++) {
-      crew.push({
-        id: `${dept}-${i}`,
-        name: name(),
-        rank: ranks[Math.min(i, ranks.length - 1)],
-        role: ROLE[dept][i],
-        dept,
-        section: d.section,
-        toughness: 0.75 + r() * 0.5,
-        health: 1,
-        dose: 0,
-        location: "station",
-        diedAt: null,
-        cause: null,
-      });
-    }
-  }
-  return crew;
 }
 
 export function statusOf(m) {
@@ -131,8 +94,18 @@ const SPOKEN_RANK = { "Lt.": "Lieutenant", "Lt. (jg)": "Lieutenant junior grade"
 export const spokenRank = (rank) => SPOKEN_RANK[rank] ?? rank;
 
 export class Roster {
-  constructor(seed) {
-    this.crew = generateCrew(seed);
+  // `source`: the profiles aboard (career.js crewProfiles), or a number to
+  // generate a fresh crew from — tests and anything without a career.
+  // `day`: the ship calendar day, for ages.
+  constructor(source, day) {
+    let profiles = source;
+    if (!Array.isArray(source)) {
+      const c = newCareer(source);
+      profiles = crewProfiles(c);
+      day = c.day;
+    }
+    this.day = day;
+    this.crew = profiles.map((p) => memberFrom(p, day));
     this.sheltered = false;      // `all hands to shelter` in force
     this.events = [];            // { t, kind: "death"|"critical", id } — drained by alerts.js
     this.worstEta = null;        // seconds until the most at-risk person dies, at current rates
@@ -149,13 +122,34 @@ export class Roster {
   whereIs(m) { return m.location === "station" ? m.section : m.location === "sickbay" ? SICKBAY : "shelter"; }
 
   // Fit crew at their posts as a share of the department, 0..1.
+  // Fit, skilled crew at their posts against the department's full
+  // complement — 1.0 is a full department of proficient people. Reassigned
+  // crew count where they're working now, at their skill there.
   staffing(dept) {
-    const members = this.crew.filter((m) => m.dept === dept);
-    const fit = members.reduce((s, m) => s + (m.location === "station" ? FITNESS[statusOf(m)] : 0), 0);
-    return fit / members.length;
+    const core = CORE_SKILL[dept];
+    let sum = 0;
+    for (const m of this.crew) {
+      if (m.dept !== dept || m.location !== "station") continue;
+      sum += FITNESS[statusOf(m)] * skillWeight(skillLevel(m.profile, core));
+    }
+    return Math.min(STAFFING_MAX, sum / DEPARTMENTS[dept].size);
   }
   // The multiplier a department's system runs at.
   factor(dept) { return AUTOMATION + (1 - AUTOMATION) * this.staffing(dept); }
+  // Skill level (0–5) of someone in a department's core skill.
+  skillIn(m, dept) { return skillLevel(m.profile, CORE_SKILL[dept]); }
+
+  // Move someone to work in another department. The career records it in
+  // their file (career.js reassign); this moves them now.
+  reassign(id, dept) {
+    const m = this.crew.find((x) => x.id === id);
+    if (!m || m.health <= 0) return null;
+    m.dept = dept;
+    m.section = DEPARTMENTS[dept].section;
+    if (m.location === "station" || m.location === "shelter") m.location = this.sheltered ? "shelter" : "station";
+    return m;
+  }
+  find(id) { return this.crew.find((m) => m.id === id); }
 
   // ---------------- orders ----------------
   shelterAll() {
@@ -214,7 +208,9 @@ export class Roster {
 
       const harm = Object.values(h).reduce((a, b) => a + b, 0) / m.toughness;
       m.hurting = harm > 0;
-      const ceiling = Math.max(0.05, 1 - Math.max(0, m.dose - 0.5) * 0.15);
+      // Radiation caps recovery: this mission's dose most, a career's worth
+      // of exposure a little.
+      const ceiling = Math.max(0.05, 1 - Math.max(0, m.dose - 0.5) * 0.15 - Math.max(0, m.priorDose - 1.5) * 0.05);
       if (harm > 0) {
         m.health = Math.max(0, m.health - harm * dt);
         m.cause = Object.entries(h).sort((a, b) => b[1] - a[1])[0][0];
@@ -245,7 +241,7 @@ export class Roster {
 
   snapshot() {
     return {
-      crew: this.crew.map((m) => ({ ...m, status: statusOf(m), where: this.whereIs(m) })),
+      crew: this.crew.map((m) => ({ ...m, status: statusOf(m), where: this.whereIs(m), skill: this.skillIn(m, m.dept) })),
       counts: this.counts(),
       total: this.total,
       sheltered: this.sheltered,

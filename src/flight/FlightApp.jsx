@@ -8,7 +8,10 @@ import ViewscreenFX from "./ViewscreenFX.jsx";
 import GameOver from "./GameOver.jsx";
 import { useUI } from "./store.js";
 import { stopListening } from "./commsAudio.js";
-import { sim, ship, navList, nearestBody, nearbyObjects, startBodyName, byId } from "./engine.js";
+import { sim, ship, career, navList, nearestBody, nearbyObjects, startBodyName, byId } from "./engine.js";
+import { checkpoint, finalizeMission, reassign as reassignInCareer, findByName } from "../universe/personnel/career.js";
+import { fullName, skillLevel, CORE_SKILL, qualifiedDepts } from "../universe/personnel/profile.js";
+import { saveCareer, clearCareer } from "./careerStore.js";
 import { POWER_SYSTEMS } from "../universe/ship.js";
 import { AlertBoard } from "../universe/alerts.js";
 import { DEPARTMENTS } from "../universe/crew.js";
@@ -35,7 +38,7 @@ const STATIONS = [
 const STATION_HELP = {
   conn: "CONN — ahead full|half|quarter · reverse full|half|quarter · port|starboard <degrees> · all stop · come about for <name> · warp <1-3> to <name> · warp <1-3> · warp <1-3> route · drop out",
   science: "SCIENCE — ship status. scan · status for a report · withdraw to pull away from whatever is cooking the ship · reactor <0-120> to set the reactor's output limit (over 100 runs hot) · power <shields|engines|sensors|comms|life> <0-150> to change a system's share · power reset · silence alarm · voice on|off · mute / unmute.",
-  crew: "CREW — the forty aboard. all hands to shelter (radiation shelter, stations unmanned) · resume stations · evacuate <fore|aft|port|starboard> · send injured to sickbay · crew report. Click a section on the deck plan to evacuate it.",
+  crew: "CREW — the forty aboard. all hands to shelter (radiation shelter, stations unmanned) · resume stations · evacuate <fore|aft|port|starboard> · send injured to sickbay · crew report · file <name> to open a personnel file · reassign <name> to <department> (needs Qualified or better in that department's core skill) · reassign <name> back. Click a section on the deck plan to evacuate it; click a name for their file.",
   tactical: "TACTICAL — 3D chart. Drag to rotate, scroll to zoom, right-drag to pan. Shows any plotted course.",
   comms: "COMMS — auto-monitors the nearest contact's signal bands. Press LISTEN to hear a sonification of it. sweep for every contact in range · hail <name> to open a channel · tune <radio|microwave|elements|gravimetric|subspace> to filter toward one band, tune off to clear · decode to attempt to pull a message off the open channel (LISTEN first), decode stop to abort."
 };
@@ -75,6 +78,38 @@ function withdraw() {
   sim.steerToPoint(p);
   sim.throttle = 1;
   sim.log("order", `Withdrawing from ${src.name}, full impulse.`);
+}
+
+// Move someone to cover another department — only if they're qualified
+// (level 2+) in its core skill, which cross-training is for.
+function reassignOrder(name, target) {
+  const p = findByName(career, name);
+  if (!p) { sim.log("deny", `No one aboard named "${name}".`); return; }
+  const m = ship.roster.find(p.id);
+  if (!m || m.health <= 0) { sim.log("deny", `${fullName(p)} can't be reassigned.`); return; }
+  const dept = target === "back" || target === "home" ? p.post.dept : target;
+  const label = DEPARTMENTS[dept].label;
+  if (m.dept === dept) { sim.log("info", `${fullName(p)} is already working in ${label}.`); return; }
+  const lv = skillLevel(p, CORE_SKILL[dept]);
+  if (dept !== p.post.dept && lv < 2) {
+    const can = qualifiedDepts(p).filter((d) => d !== p.post.dept).map((d) => DEPARTMENTS[d].label);
+    sim.log("deny", `${p.post.rank} ${fullName(p)} isn't qualified for ${label}.` +
+      (can.length ? ` Qualified for: ${can.join(", ")}.` : " No cross-training on file."));
+    return;
+  }
+  reassignInCareer(career, p.id, dept);
+  ship.roster.reassign(p.id, dept);
+  saveCareer(career);
+  sim.log("order", dept === p.post.dept
+    ? `${p.post.rank} ${fullName(p)} back to ${label}.`
+    : `${p.post.rank} ${fullName(p)} reassigned to ${label}.`);
+}
+
+// Save the mission's state into the career as the page closes — so what
+// happened still happened, even if the tab is shut mid-crisis.
+function saveOnExit() {
+  checkpoint(career, ship.roster);
+  saveCareer(career);
 }
 
 function crewReport() {
@@ -132,6 +167,27 @@ function handleCommand(text) {
     return;
   }
   if (/^(crew report|crew status|casualties)$/.test(t)) { crewReport(); return; }
+  if ((m = t.match(/^(?:file|personnel|dossier|record)\s+(.+)$/))) {
+    const p = findByName(career, m[1]);
+    if (!p) { sim.log("deny", `No one aboard named "${m[1]}".`); return; }
+    useUI.getState().setStation("crew");
+    useUI.getState().setPersonnel(p.id);
+    return;
+  }
+  if ((m = t.match(/^reassign\s+(.+?)\s+(?:to\s+)?(back|home|command|helm|science|comms|engineering|tactical|security|medical|operations)$/))) {
+    reassignOrder(m[1], m[2]);
+    return;
+  }
+  if (/^new career$/.test(t)) {
+    sim.log("deny", "This retires the whole crew record — every file, the memorial, all of it. Export it first if you want to keep it. Type \"new career confirm\" to proceed.");
+    return;
+  }
+  if (/^new career confirm$/.test(t)) {
+    clearCareer();
+    window.removeEventListener("beforeunload", saveOnExit);
+    window.location.reload();
+    return;
+  }
   if (/^(silence alarms?|alarm off|cancel alarm)$/.test(t)) { silenceAlarm(); sim.log("order", "Alarm silenced."); return; }
   if ((m = t.match(/^(?:computer\s+)?voice\s+(on|off)$/))) {
     if (!voiceAvailable()) { sim.log("deny", "This browser has no speech synthesis."); return; }
@@ -285,6 +341,21 @@ export default function FlightApp() {
   // mounted — see loop.js for why.
   useEffect(() => startSimLoop(), []);
   useEffect(() => { useUI.getState().setRunOrder(handleCommand); }, []);
+
+  // Checkpoint the mission into the crew record every few seconds and on
+  // the way out; when the last of the crew dies, close the mission out so
+  // the next one starts with a new crew.
+  useEffect(() => {
+    let finalized = false;
+    const iv = setInterval(() => {
+      if (finalized) return;
+      checkpoint(career, ship.roster);
+      if (ship.crewLost) { finalizeMission(career); finalized = true; }
+      saveCareer(career);
+    }, 5000);
+    window.addEventListener("beforeunload", saveOnExit);
+    return () => { clearInterval(iv); window.removeEventListener("beforeunload", saveOnExit); };
+  }, []);
 
   // Publish sim state to the UI a few times a second.
   useEffect(() => {

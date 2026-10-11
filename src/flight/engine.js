@@ -4,6 +4,9 @@ import universe from "../universe/universe.json";
 import { FlightSim } from "../universe/sim.js";
 import { positionAt, magnitude } from "../universe/physics.js";
 import { ShipSystems, fluxAt } from "../universe/ship.js";
+import { newCareer, startMission } from "../universe/personnel/career.js";
+import { dateOf } from "../universe/personnel/util.js";
+import { loadCareer, saveCareer } from "./careerStore.js";
 
 export const byId = Object.fromEntries(universe.objects.map((o) => [o.id, o]));
 export const stars = universe.objects.filter((o) => o.type === "star");
@@ -28,9 +31,26 @@ export const sim = new FlightSim(universe, {
 });
 export const startBodyName = (homePlanet || homeStar).name;
 
+// The crew record, carried from mission to mission (personnel/career.js,
+// saved by careerStore.js). Loading it finalizes any mission the page was
+// closed during, then starts this one: calendar on, survivors recovered,
+// empty posts filled by transfers.
+export const career = loadCareer() ?? newCareer();
+const mission = startMission(career);
+saveCareer(career);
+
 // The ship's own condition (ship.js), stepped alongside the sim in loop.js.
 // Its warnings go to the same log as the helm's.
-export const ship = new ShipSystems({ onEvent: (kind, msg) => sim.log(kind, msg) });
+export const ship = new ShipSystems({
+  onEvent: (kind, msg) => sim.log(kind, msg),
+  profiles: mission.crew,
+  day: career.day,
+});
+sim.log("info", `Mission ${career.missions} — ${dateOf(career.day)}. ${mission.crew.length} crew aboard.`);
+if (career.missions > 1 && mission.transfers.length) {
+  const names = mission.transfers.slice(0, 4).map((p) => `${p.post.rank} ${p.identity.first} ${p.identity.last}`).join(", ");
+  sim.log("info", `${mission.transfers.length} transferred aboard to fill vacant posts: ${names}${mission.transfers.length > 4 ? ", and others" : ""}.`);
+}
 
 // Everything that heats or irradiates the ship: stars, pulsars, black holes.
 const fluxSources = universe.objects.filter((o) => ["star", "pulsar", "blackhole"].includes(o.type));

@@ -6,6 +6,9 @@ import { dirname, join } from "node:path";
 import { positionAt, gravityOnShip, magnitude } from "./physics.js";
 import { ShipSystems, sectionFacing } from "./ship.js";
 import { AlertBoard, assessThreats } from "./alerts.js";
+import { newCareer, crewProfiles, startMission, checkpoint, reassign } from "./personnel/career.js";
+import { ageOn, skillLevel, qualifiedDepts } from "./personnel/profile.js";
+import { migrateCareer } from "./personnel/schema.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const universe = JSON.parse(readFileSync(join(here, "universe.json"), "utf8"));
@@ -98,7 +101,7 @@ console.log("\n6. Gravity identifies the dominant well (for UI cues)");
 console.log("\n7. Ship systems: power, heat, hits");
 {
   const run = (env, secs, setup) => {
-    const s = new ShipSystems();
+    const s = new ShipSystems({ seed: 1 });
     setup?.(s);
     for (let t = 0; t < secs; t += 0.1) s.step(0.1, env);
     return s;
@@ -116,8 +119,10 @@ console.log("\n7. Ship systems: power, heat, hits");
   check(`overheating scrams the reactor and takes warp off-line`,
     hot.reactor.scrammed && hot.warpInhibit === "reactor scrammed", `heat ${hot.heat.toFixed(2)}`);
 
-  const boosted = run({ mode: "impulse", throttle: 0, flux: { heat: 11, rad: 11 } }, 600, (s) => s.setPower("shields", 1.5));
-  const plain = run({ mode: "impulse", throttle: 0, flux: { heat: 11, rad: 11 } }, 600);
+  // Close to the edge by design — with crew skill now in play, a weak
+  // Tactical team can't hold even boosted shields here.
+  const boosted = run({ mode: "impulse", throttle: 0, flux: { heat: 10, rad: 10 } }, 600, (s) => s.setPower("shields", 1.5));
+  const plain = run({ mode: "impulse", throttle: 0, flux: { heat: 10, rad: 10 } }, 600);
   check(`boosting shields holds them up near a hot star`, boosted.shields > 0.8 && plain.shields < 0.2,
     `boosted ${boosted.shields.toFixed(2)}, standard ${plain.shields.toFixed(2)}`);
 
@@ -125,7 +130,7 @@ console.log("\n7. Ship systems: power, heat, hits");
     sectionFacing([0, 0, 1], [0, 0, 1]) === "fore" && sectionFacing([0, 0, -1], [0, 0, 1]) === "aft" &&
     sectionFacing([1, 0, 0], [0, 0, 1]) === "port" && sectionFacing([-1, 0, 0], [0, 0, 1]) === "starboard");
 
-  const s = new ShipSystems();
+  const s = new ShipSystems({ seed: 1 });
   const r1 = s.hit({ energy: 0.6, from: [0, 0, 1] });
   const r2 = s.hit({ energy: 0.8, from: [0, 0, 1] });
   check(`shields absorb hits until they're gone, then the hull takes it`,
@@ -136,7 +141,7 @@ console.log("\n7. Ship systems: power, heat, hits");
 console.log("\n8. Alerts: parked next to a hot star");
 {
   const hot = { mode: "impulse", throttle: 0, flux: { heat: 27, rad: 27, source: { id: "x", name: "Altair 70", pos: [0, 0, 0] } } };
-  const s = new ShipSystems();
+  const s = new ShipSystems({ seed: 1 });
   const board = new AlertBoard();
   let firstRed = null, scramT = null;
   for (let t = 0; t < 600 && !s.crewLost; t += 0.1) {
@@ -151,18 +156,18 @@ console.log("\n8. Alerts: parked next to a hot star");
   check(`staying put kills the crew, and the game knows it`, s.crewLost && board.threats[0].id === "crew-lost");
 
   // Same star, but the crew does what the computer says when the reactor scrams.
-  const s2 = new ShipSystems();
+  const s2 = new ShipSystems({ seed: 1 });
   for (let t = 0; t < 600 && !s2.reactor.scrammed; t += 0.1) s2.step(0.1, hot);
   s2.step(0.1, { ...hot, throttle: 1 });
   check(`on emergency power the engines still get thrust to withdraw`,
     s2.reactor.scrammed && s2.impulseFactor > 0.25, `impulse ${(s2.impulseFactor * 100).toFixed(0)}%`);
 
-  const s3 = new ShipSystems();
+  const s3 = new ShipSystems({ seed: 1 });
   for (let t = 0; t < 4; t += 0.1) s3.step(0.1, hot);
   const shields = assessThreats(s3).find((x) => x.id === "shields");
   check(`falling shields get a countdown`, shields && shields.eta > 0 && shields.eta < 120, `eta ${shields?.eta?.toFixed(0)}s`);
 
-  const s4 = new ShipSystems();
+  const s4 = new ShipSystems({ seed: 1 });
   s4.hull.port = 0;
   for (let t = 0; t < 30; t += 0.1) s4.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } });
   check(`a hull section gone takes its components with it, and the air with it`,
@@ -214,6 +219,59 @@ console.log("\n9. Crew: forty individuals");
     said = board.takeReport();
   }
   check(`deaths are reported together, with who's left`, said && /Casualty report/.test(said) && /crew remain/.test(said), said ?? "nothing said");
+}
+
+console.log("\n10. Personnel files and the career");
+{
+  const c = newCareer(42);
+  const crew = crewProfiles(c);
+  const today = c.day;
+  check(`a new career fills all forty posts`, crew.length === 40 && crew.every((p) => p.status.state === "active"));
+  check(`profiles are internally consistent (no future events, adults, educated, posted aboard)`,
+    crew.every((p) => p.timeline.every((e) => e.day <= today) && ageOn(p, today) >= 18 && p.education.length > 0 &&
+      p.serviceRecord.some((s) => s.ship === "USS Meridian" && s.toDay == null)));
+  check(`children are younger than their parent by 18+ years`,
+    crew.every((p) => p.family.children.every((k) => (k.birthDay - p.identity.birthDay) / 365.25 >= 18)));
+  check(`seniority shows in skill: the Chief Engineer outranks the newest technician`,
+    skillLevel(crew.find((p) => p.post.slot === "engineering-0"), "reactor-ops") > skillLevel(crew.find((p) => p.post.slot === "engineering-9"), "reactor-ops"));
+
+  // A career survives being saved and loaded as JSON.
+  const round = migrateCareer(JSON.parse(JSON.stringify(c)));
+  check(`the career round-trips through JSON`, JSON.stringify(round) === JSON.stringify(c));
+
+  // Fly a mission where two die and one is badly hurt.
+  const m1 = startMission(c);
+  const s = new ShipSystems({ profiles: m1.crew, day: c.day });
+  const [a, b, hurt] = s.roster.crew;
+  a.health = 0; a.diedAt = 30; a.cause = "radiation";
+  b.health = 0; b.diedAt = 31; b.cause = "breach";
+  hurt.health = 0.2; hurt.cause = "heat"; hurt.dose = 0.4;
+  checkpoint(c, s.roster);
+  const deadIds = [a.id, b.id];
+  const m2 = startMission(c); // finalizes mission 1 first
+  check(`the dead are recorded, memorialized and their posts refilled`,
+    deadIds.every((id) => c.profiles[id].status.state === "deceased" && c.memorial.includes(id)) &&
+    m2.transfers.length === 2 && crewProfiles(c).length === 40,
+    `${m2.transfers.length} transfers`);
+  const hp = c.profiles[hurt.id];
+  check(`survivors' files record the mission, the injury, the dose and a ribbon`,
+    hp.stats.missions === 1 && hp.medical.injuries.some((x) => /Critically injured/.test(x.text)) &&
+    hp.awards.some((x) => x.id === "line-of-duty") && hp.timeline.some((e) => e.type === "dose" && e.data.sv === 0.4));
+  check(`transfers say they transferred in`, m2.transfers.every((p) => p.timeline.some((e) => /Transferred to USS Meridian/.test(e.text))));
+  check(`the injured come back partly recovered`, hp.medical.health > 0.2 && hp.medical.health <= 1, `${hp.medical.health}`);
+
+  // Reassignment needs the skill, and changes who staffs what.
+  const s2 = new ShipSystems({ profiles: m2.crew, day: c.day });
+  const crossTrained = m2.crew.find((p) => qualifiedDepts(p).some((d) => d === "engineering" && p.post.dept !== "engineering"));
+  if (crossTrained) {
+    const before = s2.roster.staffing("engineering");
+    reassign(c, crossTrained.id, "engineering");
+    s2.roster.reassign(crossTrained.id, "engineering");
+    check(`a cross-trained crew member can cover Engineering`, s2.roster.staffing("engineering") > before &&
+      crossTrained.post.assignedDept === "engineering" && crossTrained.timeline.at(-1).type === "reassigned");
+  } else {
+    check(`a cross-trained crew member can cover Engineering`, false, "no one cross-trained in this seed");
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
