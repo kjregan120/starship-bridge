@@ -2,7 +2,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Stars } from "@react-three/drei";
 import { useRef, useMemo, useState, useEffect } from "react";
 import * as THREE from "three";
-import { sim, view, galaxyPoints, nearestStar, starsWithin, blackholesWithin, beaconsWithin, systemBodies, worldPos } from "./engine.js";
+import { sim, view, collective, galaxyPoints, nearestStar, starsWithin, blackholesWithin, beaconsWithin, systemBodies, worldPos } from "./engine.js";
 import { useUI } from "./store.js";
 import { makeStarMaterials, CORONA_EXTENT } from "./starShader.js";
 import { makeFlareLoops } from "./flareLoops.js";
@@ -10,6 +10,7 @@ import { ejecta, ejectaClock } from "./ejecta.js";
 import { warpStreaks } from "./warpStreaks.js";
 import { lens, BASE_FOV } from "./lens.js";
 import { makePlanetParts, AURORA_EXTENT } from "./planetShader.js";
+import { makeCubeMesh } from "./cubeMesh.js";
 
 // How far out a star system's planets/moons start rendering as real (if tiny)
 // spheres, instead of only appearing once that star becomes THE nearest one.
@@ -327,6 +328,37 @@ function Ejecta() {
   return <points geometry={ejecta.geometry} material={ejecta.material} frustumCulled={false} />;
 }
 
+// ---- a Collective cube, when one is out (collective.js, cubeMesh.js) -------
+// Polls for the cube rather than subscribing: it comes and goes from the
+// sim loop, and a new cube (a new id) gets fresh meshes.
+function CollectiveCube() {
+  const [id, setId] = useState(null);
+  useFrame(() => {
+    const now = collective.cube?.id ?? null;
+    if (now !== id) setId(now);
+  });
+  return id ? <CubeBody key={id} /> : null;
+}
+function CubeBody() {
+  const cube = collective.cube;
+  const parts = useMemo(() => makeCubeMesh(cube.blocks.length), [cube]);
+  useEffect(() => () => {
+    parts.mesh.geometry.dispose(); parts.mesh.material.dispose();
+    parts.beams.forEach((b) => b.material.dispose());
+    parts.tractor.material.dispose();
+  }, [parts]);
+  useFrame((state) => {
+    if (collective.cube === cube) parts.update(cube, sim.pos, state.clock.elapsedTime);
+  });
+  return (
+    <>
+      <primitive object={parts.mesh} />
+      {parts.beams.map((b, i) => <primitive key={i} object={b} />)}
+      <primitive object={parts.tractor} />
+    </>
+  );
+}
+
 // ---- warp streaks ----------------------------------------------------------
 // See warpStreaks.js. The streaks are laid out along local +z; the wrapping
 // group is turned each frame so local +z is view.facing, so they always rush
@@ -403,6 +435,7 @@ export default function Scene() {
       <GalaxyField />
       <LocalSystem />
       <Ejecta />
+      <CollectiveCube />
       <WarpStreaks />
     </Canvas>
   );

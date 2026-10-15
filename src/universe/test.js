@@ -11,6 +11,8 @@ import { ageOn, skillLevel, qualifiedDepts, CORE_SKILL } from "./personnel/profi
 import { migrateCareer } from "./personnel/schema.js";
 import { parseMagnify, clampZoom, MAX_ZOOM } from "../flight/lens.js";
 import { cmeStep, cmeEta, cmeEnergy, cmeEffects, frontReach } from "./cme.js";
+import { Cube, mulberry32, HOLD, DETECT, WEAPON_RANGE, TRACTOR_RANGE, LOSE } from "./cube.js";
+import { Collective, collectiveSystems, HOME_SPACE, ROAM_COOLDOWN } from "./collective.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const universe = JSON.parse(readFileSync(join(here, "universe.json"), "utf8"));
@@ -540,6 +542,123 @@ console.log("\n15. Coronal mass ejections hit the ship");
   const t = assessThreats(warned).find((x) => x.id === "cme");
   check("an inbound CME is a red alert, with an ETA, when shields won't hold",
     t && t.level === "red" && t.eta === 42 && t.action === "power shields 150", t && `${t.level} · ${t.action}`);
+}
+
+console.log("\n16. A Collective cube");
+{
+  const cube = (o = {}) => new Cube({ pos: [0, 0, 0], post: [0, 0, 0], seed: 3, random: mulberry32(9), ...o });
+  const c = cube();
+  const roles = {};
+  for (const b of c.blocks) roles[b.role] = (roles[b.role] ?? 0) + 1;
+  check("160 blocks: a 152-block shell and an 8-block core", c.blocks.length === 160 && roles.core === 8, JSON.stringify(roles));
+  check("every face has 4 emitters, a tractor node and a regen node",
+    ["px", "nx", "py", "ny", "pz", "nz"].every((f) => c.live(f, "emitter").length === 4 && c.live(f, "tractor").length === 1 && c.live(f, "regen").length === 1));
+  check("the same seed builds the same cube", JSON.stringify(cube().blocks.map((b) => b.role)) === JSON.stringify(c.blocks.map((b) => b.role)));
+
+  // Run a cube against a ship sitting still at `at`, collecting events.
+  const run = (cb, at, secs, ship = {}) => {
+    const ev = [];
+    for (let t = 0; t < secs; t += 0.1) ev.push(...cb.step(0.1, { pos: at, facing: [0, 0, 1], mode: "impulse", ...ship }));
+    return ev;
+  };
+  const guard = cube();
+  check("a guard sleeps while you're beyond detection range", run(guard, [DETECT + 10, 0, 0], 20).length === 0 && guard.mode === "dormant");
+  const ev = run(guard, [DETECT - 5, 0, 0], 60);
+  check("...wakes, and hails once, when you come in range", ev.filter((e) => e.type === "hail").length === 1);
+  const d = Math.hypot(...guard.pos.map((x, i) => x - [DETECT - 5, 0, 0][i]));
+  check("...closes to holding range (just above you)", Math.abs(d - HOLD) < 0.3, `${d.toFixed(2)}u`);
+  const shots = ev.filter((e) => e.type === "fire");
+  check("...and cuts at you once in weapons range", shots.length > 3, `${shots.length} shots`);
+  check("its beams come from its side of the ship", shots.every((s) => s.from[0] < -0.5));
+  check("...and it locks a tractor beam on at close range", ev.some((e) => e.type === "tractor" && e.on) && guard.tractor);
+
+  // Its whole battery through the ship: shields go, then the hull facing it.
+  const s = new ShipSystems({ seed: 7 });
+  const g2 = cube({ pos: [-HOLD, 0, 0], post: null });
+  for (let t = 0; t < 150; t += 0.1) {
+    for (const e of g2.step(0.1, { pos: [0, 0, 0], facing: [0, 0, 1], mode: "impulse" }))
+      if (e.type === "fire") s.hit({ energy: e.energy, from: e.from, facing: [0, 0, 1] });
+    s.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } });
+  }
+  check("150 s under its guns: shields down, and only the hull facing it damaged", s.shields < 0.3 && s.hull.starboard < 0.9 && s.hull.port === 1,
+    `shields ${s.shields.toFixed(2)}, port hull ${s.hull.port.toFixed(2)}, starboard ${s.hull.starboard.toFixed(2)}`);
+
+  // The tractor: no warp, impulse dragged; overdrive at full impulse breaks free.
+  const held = new ShipSystems({ seed: 7 });
+  held.tractored = true;
+  held.step(0.1, { mode: "impulse", throttle: 1, flux: { heat: 0, rad: 0 } });
+  check("held in a tractor beam: warp off-line, impulse dragged", held.warpInhibit === "held by tractor beam" && held.impulseFactor < 0.2,
+    `${held.warpInhibit} · impulse ${held.impulseFactor.toFixed(2)}`);
+  const t3 = cube({ pos: [-HOLD, 0, 0], post: null });
+  run(t3, [0, 0, 0], 3);
+  const freeEv = run(t3, [0, 0, 0], 10, { straining: true });
+  check("straining against it tears the ship free", freeEv.some((e) => e.type === "tractor" && !e.on && e.why === "broke free"));
+  const relock = run(t3, [0, 0, 0], 10);
+  check("...and it can't lock on again straight away", !relock.some((e) => e.type === "tractor" && e.on));
+  const nodes = cube({ pos: [-HOLD, 0, 0], post: null });
+  for (const b of nodes.blocks) if (b.role === "tractor") b.hp = 0;
+  check("with its tractor nodes destroyed it can't hold you", !run(nodes, [0, 0, 0], 20).some((e) => e.type === "tractor" && e.on));
+
+  // Damage, regeneration, and the core.
+  const dmg = cube();
+  for (let i = 0; i < 40; i++) dmg.damage("px", 0.5);
+  check("enough damage to a face breaches it", dmg.integrity("px") < 0.4, dmg.integrity("px").toFixed(2));
+  check("the core is only hit through a breached face", cube().blocks.filter((b) => b.role === "core").every((b) => b.hp === 1) &&
+    dmg.blocks.some((b) => b.role === "core" && b.hp < 1));
+  const regen = cube();
+  const near = regen.blocks.find((b) => b.role === "plate" && regen.blocks.some((r) => r.role === "regen" && Math.max(...r.cell.map((x, i) => Math.abs(x - b.cell[i]))) <= 1));
+  near.hp = 0.5;
+  run(regen, [DETECT + 10, 0, 0], 10);
+  check("a regen node regrows damaged blocks near it", near.hp > 0.55, near.hp.toFixed(2));
+  const far = cube({ pos: [0, 0, 0], post: null });
+  const lostEv = run(far, [LOSE + 5, 0, 0], 1);
+  check("beyond range it loses you", lostEv.some((e) => e.type === "lost") && far.mode === "lost");
+
+  // Where they come from.
+  const posOf = (o) => positionAt(o, byId, 0);
+  const stars = objects.filter((o) => o.type === "star");
+  const home = stars[0];
+  const held3 = collectiveSystems(stars, home, posOf);
+  check("three Collective systems, all far from home, always the same three",
+    held3.length === 3 && held3.every((s) => dist(posOf(s), posOf(home)) > 400) &&
+    JSON.stringify(collectiveSystems(stars, home, posOf).map((s) => s.id)) === JSON.stringify(held3.map((s) => s.id)),
+    held3.map((s) => s.name).join(", "));
+  const col = new Collective({ stars, home, posOf, random: mulberry32(4) });
+  const atHeld = posOf(held3[0]);
+  const spawnEv = col.step(0.1, { pos: [atHeld[0] + 100, atHeld[1], atHeld[2]], mode: "impulse" });
+  check("coming near a Collective system brings out its guard", spawnEv.some((e) => e.type === "spawn" && !e.roaming) && col.cube?.mode === "dormant");
+
+  // Roamers: never in home space, never at warp, and a cooldown after each.
+  const roamAt = (pos, mode, secs) => {
+    const r = new Collective({ stars, home, posOf, random: mulberry32(11) });
+    let n = 0;
+    for (let t = 0; t < secs; t += 1) for (const e of r.step(1, { pos, mode })) if (e.type === "spawn" && e.roaming) n++;
+    return { n, r };
+  };
+  const hp = posOf(home);
+  // Somewhere outside home space and far from every Collective system.
+  const away = [hp[0] + HOME_SPACE + 50, hp[1], hp[2]];
+  check("no roamer in home space, however long", roamAt(hp, "impulse", 20000).n === 0);
+  check("no roamer while at warp", roamAt(away, "warp", 20000).n === 0);
+  const { n, r } = roamAt(away, "impulse", 20000);
+  check("outside home space, the odd roamer turns up", n >= 1, `${n} in ~5.5 h`);
+  r.cube && (r.cube.mode = "lost");
+  r.step(1, { pos: away, mode: "impulse" });
+  let again = false;
+  for (let t = 0; t < ROAM_COOLDOWN - 5; t += 1) if (r.step(1, { pos: [1e6, 0, 0], mode: "impulse" }).some((e) => e.type === "spawn")) again = true;
+  check("...and none for a while after one breaks off", !again);
+
+  // The alerts.
+  const a = new ShipSystems({ seed: 7 });
+  a.incoming = [{ kind: "cube", name: "Collective cube", dist: 40, eta: 15, tractor: false, strain: 0 }];
+  a.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } });
+  const ct = assessThreats(a).find((x) => x.id === "cube");
+  check("a closing cube is a red alert with time to weapons range, and the advice to warp out",
+    ct && ct.level === "red" && ct.eta === 15 && ct.action === "warp 3", ct && `${ct.title} · ${ct.action}`);
+  a.tractored = true;
+  a.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } });
+  const tt = assessThreats(a).find((x) => x.id === "tractor");
+  check("held: the tractor alert says how to break free", tt && tt.action === "reactor 120", tt && tt.action);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

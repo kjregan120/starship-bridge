@@ -156,6 +156,32 @@ export function assessThreats(ship) {
     });
   }
 
+  // ---- a Collective cube (cube.js; ship.incoming, set by the loop) ----
+  // Closing: red, with time to weapons range — run while warp is still an
+  // option. Held: the tractor is the threat, and the way out is to strain.
+  const cube = (ship.incoming ?? []).find((x) => x.kind === "cube");
+  if (cube) {
+    if (ship.tractored) {
+      const overdriven = ship.reactor.capacity > 100;
+      add({
+        id: "tractor", level: "red", sev: 90, title: "Held in tractor beam",
+        detail: cube.strain > 0 ? `Straining — ${Math.round(cube.strain * 100)}%` : "Warp off-line · impulse at 15%",
+        eta: null, action: overdriven ? "ahead full" : "reactor 120",
+        say: `We're caught in their tractor beam. ${overdriven ? "Recommend full impulse to break free." : "Recommend overdriving the reactor and full impulse to break free."}`,
+      });
+    }
+    const inRange = cube.eta == null;
+    add({
+      id: "cube", level: "red", sev: inRange ? 88 : 80,
+      title: `${cube.name} — ${Math.round(cube.dist)}u${inRange ? "" : ", closing"}`,
+      detail: inRange ? "In weapons range" : "Closing to weapons range",
+      eta: cube.eta, action: ship.tractored ? null : ship.warpInhibit ? "ahead full" : "warp 3",
+      say: inRange
+        ? "The cube is in weapons range."
+        : `Collective cube closing on us. It will be in weapons range${sayEta(cube.eta)}. Recommend we go to warp.`,
+    });
+  }
+
   // ---- reactor ----
   if (ship.reactor.scrammed) {
     add({

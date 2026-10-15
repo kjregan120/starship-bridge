@@ -4,6 +4,8 @@ import universe from "../universe/universe.json";
 import { FlightSim } from "../universe/sim.js";
 import { positionAt, magnitude } from "../universe/physics.js";
 import { ShipSystems, fluxAt } from "../universe/ship.js";
+import { Collective } from "../universe/collective.js";
+import { Cube } from "../universe/cube.js";
 import { newCareer, startMission } from "../universe/personnel/career.js";
 import { dateOf, fmtClock, SHIFT_LABEL } from "../universe/personnel/util.js";
 import { loadCareer, saveCareer } from "./careerStore.js";
@@ -60,6 +62,25 @@ export function shipFlux() {
   return fluxAt(sim.pos, fluxSources, (o) => positionAt(o, byId, sim.t));
 }
 export { universe };
+
+// The Collective (collective.js): the systems it holds and any cube that's
+// out — stepped in loop.js, drawn in Scene.jsx.
+export const collective = new Collective({
+  stars, home: homeStar, posOf: (o) => positionAt(o, byId, sim.t),
+});
+
+// Dev builds only: a handle for poking at the live sim from the console,
+// e.g. __bridge.summonCube() to bring a cube in 12u ahead.
+if (import.meta.env?.DEV && typeof window !== "undefined") {
+  window.__bridge = {
+    sim, ship, collective,
+    summonCube(range = 12) {
+      const f = sim.facing, p = sim.pos;
+      collective.cube = new Cube({ id: `cube-dev-${Date.now()}`, pos: [p[0] + f[0] * range, p[1] + f[1] * range + 1, p[2] + f[2] * range], seed: 5 });
+      return collective.cube;
+    },
+  };
+}
 
 // The ship's rendered facing direction — the single source of truth for
 // "which way am I pointed," shared by the viewscreen (Scene.jsx)

@@ -46,6 +46,7 @@ const EMERGENCY_POWER = 20;         // batteries while the reactor is scrammed
 const EMERGENCY_THRUST = 10;        // of that, held for the engines — enough to back away
 const SCRAM_RESTART = 30;           // seconds before a restart is attempted
 const NO_FUEL_POWER = 0.25;         // what the reactor manages on an empty tank
+const TRACTOR_DRAG = 0.15;          // impulse left while held in a tractor beam
 
 // ---- fuel ---------------------------------------------------------------
 const FUEL_BURN = 1 / 2400;         // per second at 100 units of output (40 min)
@@ -146,6 +147,9 @@ export class ShipSystems {
     // Hazards on their way to the ship that something outside it is tracking
     // (coronal mass ejections — cme.js, set by the flight loop): { kind, source, eta, energy }.
     this.incoming = [];
+    // Held in a tractor beam (a Collective cube's — cube.js, set by the
+    // flight loop): no warp, and the impulse engines barely move the ship.
+    this.tractored = false;
     this.harm = {};          // what's hurting the crew right now, by cause (health/s)
     this.crewLost = false;
     // How fast key readings are moving (per second, smoothed) — for the
@@ -395,10 +399,12 @@ export class ShipSystems {
   }
 
   _engineStep(dt, env) {
-    this.impulseFactor = this.health.impulse * Math.min(1, this.power.sat.engines) * this.roster.factor("helm");
+    this.impulseFactor = this.health.impulse * Math.min(1, this.power.sat.engines) * this.roster.factor("helm") *
+      (this.tractored ? TRACTOR_DRAG : 1);
     const w = this.health.warp;
     this.warpMax = w > 0.7 ? 3 : w > 0.5 ? 2 : w > 0.35 ? 1 : 0;
     this.warpInhibit =
+      this.tractored ? "held by tractor beam" :
       this.reactor.scrammed ? "reactor scrammed" :
       this.warpMax === 0 ? "warp coils damaged" :
       this.fuel < 0.02 ? "fuel exhausted" :
@@ -649,7 +655,7 @@ export class ShipSystems {
       interference: this.interference, noise: this.noise,
       commsQuality: this.commsQuality(), sensorQuality: this.sensorQuality(),
       flux: { ...this.flux }, incoming: this.incoming.map((x) => ({ ...x })),
-      impulseFactor: this.impulseFactor, warpMax: this.warpMax, warpInhibit: this.warpInhibit,
+      impulseFactor: this.impulseFactor, warpMax: this.warpMax, warpInhibit: this.warpInhibit, tractored: this.tractored,
       lastHit: this._lastHit ? { ...this._lastHit } : null,
       repairs: Object.fromEntries(Object.entries(this.repairs).map(([k, v]) => [k, { ...v }])),
       repairFocus: this.repairFocus,
