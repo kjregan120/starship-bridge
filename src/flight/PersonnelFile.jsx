@@ -11,7 +11,7 @@ import {
   CORE_SKILL, qualifiedDepts, activityTrains, PRONOUNS,
 } from "../universe/personnel/profile.js";
 import { LEVEL_XP } from "../universe/personnel/data/skills.js";
-import { dateOf, yearsBetween } from "../universe/personnel/util.js";
+import { dateOf, yearsBetween, SHIFT_LABEL, SHIFT_HOURS } from "../universe/personnel/util.js";
 
 const TABS = ["Overview", "Skills", "Duties", "Service", "Family", "Medical", "Timeline"];
 const MARITAL = { single: "Single", married: "Married", partnered: "Partnered", divorced: "Divorced", widowed: "Widowed" };
@@ -21,13 +21,18 @@ function Row({ k, v }) {
   return <div className="pf-row"><span className="pf-k">{k}</span><span className="pf-v">{v}</span></div>;
 }
 
-function SkillBar({ id, xp, core }) {
+// `gained`: practice this mission, not yet written into the file.
+function SkillBar({ id, xp: filed, gained = 0, core }) {
+  const xp = filed + gained;
   const lv = skillLevel({ skills: { [id]: { xp } } }, id);
   const next = LEVEL_XP[lv + 1];
   const into = next ? (xp - LEVEL_XP[lv]) / (next - LEVEL_XP[lv]) : 1;
   return (
     <div className={`pf-skill ${core ? "core" : ""}`}>
-      <span className="pf-skill-name">{skillById[id]?.label ?? id}{core ? " ★" : ""}</span>
+      <span className="pf-skill-name">
+        {skillById[id]?.label ?? id}{core ? " ★" : ""}
+        {gained >= 0.5 && <span className="pf-gain" title="Practice this mission"> +{Math.round(gained)}</span>}
+      </span>
       <span className="pf-pips">
         {[1, 2, 3, 4, 5].map((i) => (
           <span key={i} className={`pf-pip ${i <= lv ? "on" : i === lv + 1 ? "part" : ""}`}
@@ -50,7 +55,12 @@ export default function PersonnelFile({ id, member }) {
   const dept = member?.dept ?? p.post.assignedDept ?? p.post.dept;
   const dead = p.status.state === "deceased" || member?.status === "dead";
   const core = CORE_SKILL[p.post.dept];
-  const skills = Object.entries(p.skills).sort((a, b) => (b[0] === core) - (a[0] === core) || b[1].xp - a[1].xp);
+  const gained = member?.xp ?? {};
+  const skillIds = [...new Set([...Object.keys(p.skills), ...Object.keys(gained)])];
+  const xpOf = (k) => (p.skills[k]?.xp ?? 0) + (gained[k] ?? 0);
+  const skills = skillIds.sort((a, b) => (b === core) - (a === core) || xpOf(b) - xpOf(a));
+  const crossSkill = p.post.crossTrain;
+  const [from, to] = SHIFT_HOURS[p.post.shift] ?? [8, 16];
   const canGo = qualifiedDepts(p).filter((d) => d !== dept);
 
   return (
@@ -86,6 +96,8 @@ export default function PersonnelFile({ id, member }) {
                 <Row k="Aboard since" v={dateOf(p.joinedShipDay)} />
                 <Row k="Missions" v={p.stats.missions} />
                 <Row k="Primary duty" v={dutyById[p.duties[0]]?.label ?? "—"} />
+                <Row k="Watch" v={`${SHIFT_LABEL[p.post.shift] ?? "—"} (${String(from).padStart(2, "0")}00–${String(to % 24).padStart(2, "0")}00)${member && !dead
+                  ? ` · ${member.location === "station" ? "on duty" : member.location === "quarters" ? "off watch" : member.location}, ${Math.round((1 - member.fatigue) * 100)}% rested` : ""}`} />
                 <Row k="Core skill" v={`${skillById[core].label} — ${levelName(skillLevel(p, core))}`} />
                 <Row k="Decorations" v={p.awards.length ? p.awards.length : "None"} />
               </div>
@@ -104,8 +116,19 @@ export default function PersonnelFile({ id, member }) {
 
           {tab === "Skills" && (
             <div className="pf-skills">
-              {skills.map(([sid, s]) => <SkillBar key={sid} id={sid} xp={s.xp} core={sid === core} />)}
-              <div className="pf-muted">★ core skill for {DEPARTMENTS[p.post.dept].label}. Qualified (2+) in a department's core skill means they can be reassigned there.</div>
+              {skills.map((sid) => <SkillBar key={sid} id={sid} xp={p.skills[sid]?.xp ?? 0} gained={gained[sid] ?? 0} core={sid === core} />)}
+              <div className="pf-muted">★ core skill for {DEPARTMENTS[p.post.dept].label}. Qualified (2+) in a department's core skill means they can be reassigned there. +N is practice this mission — it goes on file when the mission ends.</div>
+              {!dead && (
+                <div className="pf-actions">
+                  <span className="pf-k">Cross-train{crossSkill ? ` (now: ${skillById[crossSkill]?.label})` : ""}:</span>
+                  {Object.keys(CORE_SKILL).filter((d) => d !== p.post.dept && CORE_SKILL[d] !== crossSkill).map((d) => (
+                    <button key={d} className="crew-btn small" onClick={() => runOrder?.(`cross-train ${fullName(p)} in ${d}`)}
+                      title={`${skillById[CORE_SKILL[d]].label}: ${levelName(skillLevel(p, CORE_SKILL[d]))}`}>
+                      {DEPARTMENTS[d].label.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 

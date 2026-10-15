@@ -40,3 +40,20 @@ export function dayOf(y, m, d) { return Math.round((Date.UTC(y, m - 1, d) - EPOC
 export function dateOf(day) { return new Date(EPOCH + day * MS_DAY).toISOString().slice(0, 10); }
 export function yearOf(day) { return new Date(EPOCH + day * MS_DAY).getUTCFullYear(); }
 export function yearsBetween(from, to) { return Math.floor((to - from) / YEAR); }
+
+// ---- the ship's clock and watches -------------------------------------------
+// The career keeps a day number and an hour (0–24). During a mission the
+// clock runs at CLOCK_RATE ship seconds per real second — a ship hour is a
+// real minute, so an eight-hour watch changes over every eight minutes of
+// play. Between missions it jumps a few days.
+export const CLOCK_RATE = 60;
+export const SHIFTS = ["alpha", "beta", "gamma"];
+export const SHIFT_HOURS = { alpha: [8, 16], beta: [16, 24], gamma: [0, 8] };
+export const SHIFT_LABEL = { alpha: "Alpha", beta: "Beta", gamma: "Gamma" };
+export const shiftAt = (hour) => (hour >= 8 && hour < 16 ? "alpha" : hour >= 16 ? "beta" : "gamma");
+// Hours since the watch began.
+export const intoShift = (hour) => hour - SHIFT_HOURS[shiftAt(hour)][0];
+export function fmtClock(hour) {
+  const m = Math.floor(hour * 60) % 1440;
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}${String(m % 60).padStart(2, "0")}`;
+}

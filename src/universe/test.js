@@ -6,8 +6,8 @@ import { dirname, join } from "node:path";
 import { positionAt, gravityOnShip, magnitude } from "./physics.js";
 import { ShipSystems, sectionFacing } from "./ship.js";
 import { AlertBoard, assessThreats } from "./alerts.js";
-import { newCareer, crewProfiles, startMission, checkpoint, reassign } from "./personnel/career.js";
-import { ageOn, skillLevel, qualifiedDepts } from "./personnel/profile.js";
+import { newCareer, crewProfiles, startMission, checkpoint, reassign, crossTrain, finalizeMission } from "./personnel/career.js";
+import { ageOn, skillLevel, qualifiedDepts, CORE_SKILL } from "./personnel/profile.js";
 import { migrateCareer } from "./personnel/schema.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -262,7 +262,7 @@ console.log("\n10. Personnel files and the career");
 
   // Reassignment needs the skill, and changes who staffs what.
   const s2 = new ShipSystems({ profiles: m2.crew, day: c.day });
-  const crossTrained = m2.crew.find((p) => qualifiedDepts(p).some((d) => d === "engineering" && p.post.dept !== "engineering"));
+  const crossTrained = m2.crew.find((p) => p.post.shift === "alpha" && qualifiedDepts(p).some((d) => d === "engineering" && p.post.dept !== "engineering"));
   if (crossTrained) {
     const before = s2.roster.staffing("engineering");
     reassign(c, crossTrained.id, "engineering");
@@ -272,6 +272,182 @@ console.log("\n10. Personnel files and the career");
   } else {
     check(`a cross-trained crew member can cover Engineering`, false, "no one cross-trained in this seed");
   }
+}
+
+console.log("\n11. Watches, learning by doing, and repairs");
+{
+  const quiet = { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } };
+  const run = (ship, secs, env = quiet) => { for (let t = 0; t < secs; t += 0.1) ship.step(0.1, env); };
+
+  // Watches: a third of the crew at their posts, changing over on the clock.
+  const w = new ShipSystems({ seed: 8, hour: 15.5 });
+  const onAt = (ship) => ship.roster.crew.filter((m) => m.location === "station");
+  check(`at 1530 only alpha watch is at their posts, the rest in quarters`,
+    onAt(w).every((m) => m.shift === "alpha") && w.roster.crew.filter((m) => m.location === "quarters").length > 20, `${onAt(w).length} on watch`);
+  const snap = JSON.parse(JSON.stringify(w.snapshot()));
+  check(`the snapshot for the UI carries watches and the clock`, snap.roster.shift === "alpha" && snap.roster.clock.hour === 15.5 &&
+    snap.roster.crew.every((m) => typeof m.onWatch === "boolean" && m.skill >= 0 && !m.profile) && snap.repairs != null);
+  check(`a full watch staffs every department`, ["engineering", "tactical", "operations", "helm"].every((d) => w.roster.staffing(d) > 0.7));
+  let said = [];
+  w.onEvent = (k, msg) => said.push(msg);
+  run(w, 40); // 40 ship minutes
+  check(`at 1600 beta watch takes over`, onAt(w).every((m) => m.shift === "beta") && said.some((x) => /Beta watch has the ship/.test(x)), `${onAt(w).length} on watch`);
+
+  // All hands: everyone at their post, and they tire.
+  const ah = new ShipSystems({ seed: 8, hour: 9 });
+  const before = onAt(ah).length;
+  ah.roster.callAllHands();
+  check(`call all hands brings the off watch to their stations`, onAt(ah).length > 2 * before, `${before} → ${onAt(ah).length}`);
+  run(ah, 18 * 60); // 18 ship hours, to 0300
+  const tired = ah.roster.stationFatigue();
+  check(`...and the alert board says to stand down`, assessThreats(ah).some((t) => t.action === "stand down"), `fatigue ${tired.toFixed(2)}`);
+  ah.roster.standDown();
+  const fresh = new ShipSystems({ seed: 8, hour: 3 });
+  check(`a crew kept at stations pays for it: the watch left on duty is worn out`,
+    ah.roster.staffing("engineering") < 0.85 * fresh.roster.staffing("engineering"),
+    `engineering ${ah.roster.staffing("engineering").toFixed(2)} vs ${fresh.roster.staffing("engineering").toFixed(2)} rested`);
+  check(`stand down sends the off watch to quarters to rest`, onAt(ah).every((m) => ah.roster.onWatch(m)) && ah.roster.crew.some((m) => m.location === "quarters"));
+  const r0 = ah.roster.crew.find((m) => m.location === "quarters").fatigue;
+  run(ah, 4 * 60);
+  check(`...where they recover`, ah.roster.crew.filter((m) => m.location === "quarters").every((m) => m.fatigue < r0));
+
+  // Shelter takes everyone, and an evacuated section stays clear through a watch change.
+  const sh = new ShipSystems({ seed: 8, hour: 7.8 });
+  sh.roster.shelterSection("port");
+  run(sh, 30);
+  check(`an evacuated section stays clear across a watch change`, !sh.roster.crew.some((m) => m.health > 0 && m.location !== "shelter" && sh.roster.whereIs(m) === "port"));
+  sh.roster.shelterAll();
+  check(`all hands to shelter takes the off watch too`, sh.roster.crew.every((m) => m.location === "shelter" || m.location === "sickbay"));
+  sh.roster.resumeStations();
+  check(`resume stations sends people back to posts and quarters`, onAt(sh).length > 5 && sh.roster.crew.some((m) => m.location === "quarters"));
+
+  // Learning by doing: watches teach, and teach more under strain.
+  const calm = new ShipSystems({ seed: 9, hour: 9 }), hot = new ShipSystems({ seed: 9, hour: 9 });
+  hot.heat = 0.8;
+  check(`a reactor running hot is a department under strain`, hot.strain("engineering") === 3 && calm.strain("engineering") === 1);
+  hot.strain = (d) => (d === "engineering" ? 3 : 1); // hold it there for the comparison
+  run(calm, 6 * 60); run(hot, 6 * 60);
+  const engXp = (ship) => ship.roster.crew.filter((m) => m.homeDept === "engineering" && m.location === "station")
+    .reduce((a, m) => a + (m.xp["reactor-ops"] ?? 0), 0);
+  check(`hours on watch are practice in their duties`, engXp(calm) > 0, `${engXp(calm).toFixed(1)} xp`);
+  check(`...and fighting a problem teaches faster`, engXp(hot) > 2 * engXp(calm), `${engXp(hot).toFixed(1)} vs ${engXp(calm).toFixed(1)}`);
+
+  // Repairs: the watch fixes things, all hands faster, the focus first.
+  const dmg = (allHands) => {
+    const ship = new ShipSystems({ seed: 10, hour: 9 });
+    if (allHands) ship.roster.callAllHands();
+    ship.health.reactor = 0.4; ship.health.radiators = 0.4;
+    run(ship, 120);
+    return ship;
+  };
+  const watch = dmg(false), all = dmg(true);
+  check(`the watch repairs damaged components`, watch.health.reactor > 0.5, `reactor 0.40 → ${watch.health.reactor.toFixed(2)}`);
+  check(`all hands repairs faster`, all.health.reactor - 0.4 > 1.8 * (watch.health.reactor - 0.4), `${all.health.reactor.toFixed(2)} vs ${watch.health.reactor.toFixed(2)}`);
+  check(`repair work is practice for whoever did it`, all.roster.crew.some((m) => (m.xp["damage-control"] ?? 0) > 0));
+  const foc = new ShipSystems({ seed: 10, hour: 9 });
+  foc.health.reactor = 0.4; foc.health.radiators = 0.4;
+  foc.setRepairFocus("radiators");
+  run(foc, 120);
+  check(`repair <x> puts the crews on it first`, foc.health.radiators - 0.4 > 1.5 * (foc.health.reactor - 0.4), `radiators ${foc.health.radiators.toFixed(2)}, reactor ${foc.health.reactor.toFixed(2)}`);
+  const br = new ShipSystems({ seed: 10, hour: 9 });
+  br.hull.fore = 0.2;
+  br.roster.callAllHands(br.breached()); // nobody goes to a post that's open to space
+  const keptOut = br.roster.crew.filter((m) => m.homeDept === "science" && m.location === "shelter").length;
+  said = [];
+  br.onEvent = (k, msg) => said.push(msg);
+  run(br, 200);
+  check(`damage control seals a breach`, br.hull.fore >= 0.3 && said.some((x) => /Breach sealed — fore/.test(x)), `fore ${br.hull.fore.toFixed(2)}`);
+  check(`once it's sealed, the crew kept out of that section go back to work`,
+    keptOut === 5 && !br.roster.crew.some((m) => m.health > 0 && m.homeDept === "science" && m.location === "shelter") &&
+    br.roster.staffing("science") > 0.7, `${keptOut} kept out; science ${br.roster.staffing("science").toFixed(2)} after`);
+  const evaShip = new ShipSystems({ seed: 10, hour: 9 });
+  evaShip.hull.aft = 0.6;
+  run(evaShip, 5, { ...quiet, flux: { heat: 0, rad: 20 } });
+  check(`hull work outside waits for the radiation to drop`, evaShip.repairs.aft.rate === 0 && /radiation|EVA/.test(evaShip.repairs.aft.blocked ?? ""), evaShip.repairs.aft.blocked);
+
+  // The career: routine between missions, practice on file, cross-training.
+  const c = newCareer(77);
+  startMission(c);
+  const p0 = crewProfiles(c)[5];
+  const xp0 = Object.values(p0.skills).reduce((a, x) => a + x.xp, 0);
+  const sh2 = new ShipSystems({ profiles: crewProfiles(c), day: c.day, hour: c.hour });
+  const m0 = sh2.roster.find(p0.id);
+  m0.xp["damage-control"] = 40.6;
+  checkpoint(c, sh2.roster);
+  finalizeMission(c);
+  check(`a mission's practice goes on file`, p0.timeline.some((e) => e.type === "practice" && /^Mission 1/.test(e.text) && e.data.xp["damage-control"] === 40));
+  const target = Object.keys(CORE_SKILL).find((d) => d !== p0.post.dept && d !== "command" && skillLevel(p0, CORE_SKILL[d]) < 2);
+  crossTrain(c, p0.id, target);
+  const tXp = p0.skills[CORE_SKILL[target]]?.xp ?? 0;
+  const hour0 = c.hour;
+  startMission(c, () => 0.99); // ten days between missions
+  const xp1 = Object.values(p0.skills).reduce((a, x) => a + x.xp, 0);
+  check(`the days between missions are practice too`, xp1 > xp0 && p0.timeline.some((e) => e.type === "practice" && /^Routine duties/.test(e.text)), `+${xp1 - xp0} xp`);
+  check(`cross-training goes to the chosen department's skill`, (p0.skills[CORE_SKILL[target]]?.xp ?? 0) > tXp && p0.post.crossTrain === CORE_SKILL[target], `${target}`);
+  check(`a mission can start on any watch`, c.hour !== hour0 && c.hour >= 0 && c.hour < 24, `${c.hour}`);
+
+  // Saves from before watches existed load, and get them.
+  const old = JSON.parse(JSON.stringify(newCareer(5)));
+  old.version = 1; delete old.hour;
+  for (const p of Object.values(old.profiles)) { p.schemaVersion = 1; delete p.post.shift; delete p.post.crossTrain; }
+  migrateCareer(old);
+  check(`a pre-watch save migrates: everyone gets their post's watch`, old.hour === 8 &&
+    Object.values(old.profiles).every((p) => ["alpha", "beta", "gamma"].includes(p.post.shift) && p.schemaVersion === 2));
+}
+
+console.log("\n13. Wear and tear");
+{
+  const quiet = { mode: "impulse", throttle: 0.3, flux: { heat: 0, rad: 0 } };
+  const run = (ship, secs, env = quiet) => { for (let t = 0; t < secs; t += 0.1) ship.step(0.1, env); };
+  const rng = (seed) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+
+  const off = new ShipSystems({ seed: 11, hour: 9 });
+  run(off, 600);
+  check(`without faults on, nothing breaks by itself`, off.wear === null && Object.values(off.health).every((v) => v === 1));
+
+  // Half an hour of ordinary flying: things break, and the crews fix them.
+  const said = [];
+  const on = new ShipSystems({ seed: 11, hour: 9, faults: true, random: rng(3), onEvent: (k, m) => said.push(m) });
+  run(on, 1800);
+  const faults = said.filter((m) => /^Fault — /.test(m));
+  check(`with faults on, systems fault now and then`, faults.length >= 3 && faults.length <= 20, `${faults.length} in 30 min: ${faults.slice(0, 3).join(" | ")}`);
+  check(`...and the watch crews repair them`, said.some((m) => /Repairs complete|contained/.test(m)) &&
+    Object.values(on.health).filter((v) => v < 0.5).length <= 1, Object.entries(on.health).map(([k, v]) => `${k} ${v.toFixed(2)}`).join(", "));
+
+  // A spreading fault: contained by the crew, then repaired, then the wear starts again.
+  const leak = (setup) => {
+    const ship = new ShipSystems({ seed: 12, hour: 9, faults: true, random: () => 0.99 });
+    setup?.(ship);
+    ship.health.reactor = 0.8;
+    ship.wear.cause.reactor = "coolant pump seized";
+    ship.wear.active.reactor = { name: "coolant pump seized", spread: 0.004, work: 40, done: 0, at: 0 };
+    return ship;
+  };
+  const fixed = leak();
+  check(`a spreading fault goes on the alert list, with the order to fix it`,
+    assessThreats(fixed).some((t) => t.id === "fault-reactor" && t.action === "repair reactor"));
+  fixed.roster.callAllHands();
+  const log = [];
+  let wearAtRepair = null;
+  fixed.onEvent = (k, m) => { log.push(m); if (/Repairs complete — reactor/.test(m)) wearAtRepair = fixed.wear.wear.reactor; };
+  run(fixed, 900);
+  check(`...the crew contain it, repair it, and its wear starts over`, log.some((m) => /coolant pump seized — contained/.test(m)) &&
+    !fixed.wear.active.reactor && fixed.health.reactor >= 0.999 && wearAtRepair === 0 && !fixed.wear.cause.reactor,
+    `reactor ${fixed.health.reactor.toFixed(3)}, wear at repair ${wearAtRepair}`);
+  const alone = leak((ship) => ship.roster.shelterAll());
+  run(alone, 120);
+  const t2 = assessThreats(alone).find((t) => t.id === "fault-reactor");
+  check(`with nobody at their posts it keeps spreading, and goes red`, alone.health.reactor < 0.4 && alone.wear.active.reactor &&
+    t2?.level === "red", `reactor ${alone.health.reactor.toFixed(2)}, ${t2?.level} — ${t2?.detail}`);
+
+  // Short-handed departments keep up with less maintenance.
+  const full = new ShipSystems({ seed: 13, hour: 9, faults: true, random: () => 0.99 });
+  const thin = new ShipSystems({ seed: 13, hour: 9, faults: true, random: () => 0.99 });
+  thin.roster.shelterAll();
+  const w0 = full.wear.wear.comms;
+  run(full, 300); run(thin, 300);
+  check(`an unmanned department's systems wear faster`, thin.wear.wear.comms - w0 > 1.3 * (full.wear.wear.comms - w0),
+    `${(thin.wear.wear.comms - w0).toFixed(3)} vs ${(full.wear.wear.comms - w0).toFixed(3)}`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

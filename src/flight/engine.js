@@ -5,7 +5,7 @@ import { FlightSim } from "../universe/sim.js";
 import { positionAt, magnitude } from "../universe/physics.js";
 import { ShipSystems, fluxAt } from "../universe/ship.js";
 import { newCareer, startMission } from "../universe/personnel/career.js";
-import { dateOf } from "../universe/personnel/util.js";
+import { dateOf, fmtClock, SHIFT_LABEL } from "../universe/personnel/util.js";
 import { loadCareer, saveCareer } from "./careerStore.js";
 
 export const byId = Object.fromEntries(universe.objects.map((o) => [o.id, o]));
@@ -43,10 +43,12 @@ saveCareer(career);
 // Its warnings go to the same log as the helm's.
 export const ship = new ShipSystems({
   onEvent: (kind, msg) => sim.log(kind, msg),
+  faults: true,                 // wear and tear: systems break on their own
   profiles: mission.crew,
   day: career.day,
+  hour: career.hour,
 });
-sim.log("info", `Mission ${career.missions} — ${dateOf(career.day)}. ${mission.crew.length} crew aboard.`);
+sim.log("info", `Mission ${career.missions} — ${dateOf(career.day)}, ${fmtClock(career.hour)} hours. ${mission.crew.length} crew aboard; ${SHIFT_LABEL[ship.roster.shift]} watch has the ship.`);
 if (career.missions > 1 && mission.transfers.length) {
   const names = mission.transfers.slice(0, 4).map((p) => `${p.post.rank} ${p.identity.first} ${p.identity.last}`).join(", ");
   sim.log("info", `${mission.transfers.length} transferred aboard to fill vacant posts: ${names}${mission.transfers.length > 4 ? ", and others" : ""}.`);

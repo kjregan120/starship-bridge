@@ -8,23 +8,43 @@
 // and location as things happen, and checkpointed back into the career.
 //
 // Each crew member has a department, a duty station in one of the hull
-// sections, and a location:
+// sections, quarters (port or starboard), a watch, and a location:
 //   station  — at their post in their department's section
+//   quarters — off watch, resting
 //   sickbay  — being treated (starboard section)
 //   shelter  — in the shielded core, off duty
 // What hurts the crew is worked out per person from where they are: a
 // breach kills the people in that section first, engineering takes the
 // reactor's heat, the shelter cuts radiation to 15%.
 //
+// The ship runs three eight-hour watches (alpha 0800, beta 1600, gamma
+// 0000) on a clock that runs a ship hour per real minute (util.js). About
+// a third of each department is on watch at a time; the rest are in
+// quarters. `call all hands` brings everyone to their stations — more
+// hands for a crisis and for repairs — at the cost of fatigue: hours at a
+// post wear people down, rest brings them back, and a tired crew works
+// worse.
+//
 // Staffing feeds back into the ship: each department's fit crew at their
-// posts, weighted by skill in the department's core skill, sets how well
-// its system runs (staffing()). A veteran is worth more than a new ensign.
-// Nobody at a post isn't zero — automation keeps things ticking at 40%.
+// posts, weighted by skill in the department's core skill and by how
+// rested they are, against what a watch needs, sets how well its system
+// runs (staffing()). A veteran is worth more than a new ensign. Nobody at
+// a post isn't zero — automation keeps things ticking at 40%.
+//
+// The crew learn by doing: hours on watch practise their duties' skills —
+// faster while their department is fighting a problem (ship.strain()) —
+// time off watch runs their training schedule, and repair work (ship.js)
+// teaches the skill it uses. Practice is held per mission (m.xp) and
+// written into their files when the mission ends (career.js).
 //
 // You (the captain) aren't on the roster.
 
 import { newCareer, crewProfiles } from "./personnel/career.js";
-import { fullName, toughness, skillLevel, CORE_SKILL, currentDept, familySummary } from "./personnel/profile.js";
+import {
+  fullName, toughness, levelOf, CORE_SKILL, currentDept, familySummary, skillById,
+  watchPerHour, routinePerDay, learnRate, isMentor, MENTOR_BONUS,
+} from "./personnel/profile.js";
+import { CLOCK_RATE, shiftAt, intoShift, SHIFTS } from "./personnel/util.js";
 
 export const DEPARTMENTS = {
   command:     { label: "Command",     section: "fore",      size: 3,  system: null,      effect: "Chain of command" },
@@ -41,6 +61,14 @@ export const DEPT_ORDER = Object.keys(DEPARTMENTS);
 const SICKBAY = "starboard";
 const AUTOMATION = 0.4;             // what a system manages with nobody at its post
 const STAFFING_MAX = 1.15;          // a department of veterans runs a little better than spec
+// Fatigue, 0 (rested) to 1 (exhausted), per ship hour. An eight-hour watch
+// leaves someone a third tired; a second watch on top of it starts to tell.
+const TIRE = 1 / 24, REST = 1 / 8, REST_POORLY = 1 / 16;
+const TIRED_AT = 0.4;
+// How well someone works, by fatigue: fully until TIRED_AT, about half
+// when exhausted.
+export const effectiveness = (fatigue) => 1 - 0.8 * Math.max(0, fatigue - TIRED_AT);
+const OFF_WATCH_HOURS = 16;         // the day's routine happens in these
 
 // What one person at their post contributes, by skill level 0–5 in the
 // department's core skill: an untrained hand 0.7, proficient (3) 1.0,
@@ -48,7 +76,7 @@ const STAFFING_MAX = 1.15;          // a department of veterans runs a little be
 const skillWeight = (level) => 0.7 + 0.1 * level;
 
 // The mission-time record for one person, from their profile.
-function memberFrom(p, day) {
+function memberFrom(p, day, i) {
   const dept = currentDept(p);
   const health = p.medical.health ?? 1;
   return {
@@ -64,6 +92,13 @@ function memberFrom(p, day) {
     pronouns: p.identity.pronouns,
     family: familySummary(p),
     profile: p,                 // the file itself — skills are read from it live
+    shift: p.post.shift ?? "alpha",
+    quarters: i % 2 ? "starboard" : "port",
+    mentor: isMentor(p),
+    watchRates: watchPerHour(p, dept),
+    routineRates: routinePerDay(p),
+    fatigue: 0,
+    xp: {},                     // practice this mission, by skill — not yet in the file
     health,
     dose: 0,
     location: "station",
@@ -96,8 +131,8 @@ export const spokenRank = (rank) => SPOKEN_RANK[rank] ?? rank;
 export class Roster {
   // `source`: the profiles aboard (career.js crewProfiles), or a number to
   // generate a fresh crew from — tests and anything without a career.
-  // `day`: the ship calendar day, for ages.
-  constructor(source, day) {
+  // `day`, `hour`: the ship's calendar and clock at launch.
+  constructor(source, day, hour = 8) {
     let profiles = source;
     if (!Array.isArray(source)) {
       const c = newCareer(source);
@@ -105,10 +140,51 @@ export class Roster {
       day = c.day;
     }
     this.day = day;
-    this.crew = profiles.map((p) => memberFrom(p, day));
+    this.clock = { day, hour };
+    this.crew = profiles.map((p, i) => memberFrom(p, day, i));
     this.sheltered = false;      // `all hands to shelter` in force
-    this.events = [];            // { t, kind: "death"|"critical", id } — drained by alerts.js
+    this.allHands = false;       // `call all hands` in force — nobody off watch
+    this.evacuated = new Set();  // sections ordered cleared, until `resume stations`
+    // { t, kind: "death"|"critical"|"level"|"watch", ... } — read by ship.js and alerts.js
+    this.events = [];
     this.worstEta = null;        // seconds until the most at-risk person dies, at current rates
+    // What a watch needs, by department and watch: the posts that stand it.
+    this.need = {};
+    for (const d of DEPT_ORDER) this.need[d] = Object.fromEntries(SHIFTS.map((s) => [s, 0]));
+    for (const m of this.crew) this.need[m.homeDept][m.shift]++;
+    this._shift = this.shift;
+    // Whoever's on watch is partway through it.
+    for (const m of this.crew) if (this.onWatch(m)) m.fatigue = intoShift(hour) * TIRE;
+    this.settle();
+  }
+
+  get shift() { return shiftAt(this.clock.hour); }
+  onWatch(m) { return this.allHands || m.shift === this.shift; }
+  // Skill level with this mission's practice counted.
+  levelIn(m, skill) { return levelOf((m.profile.skills[skill]?.xp ?? 0) + (m.xp[skill] ?? 0)); }
+
+  // Where someone should be under the standing orders: shelter if all
+  // hands are sheltering or their section is cleared or open to space,
+  // else their post if on watch, their quarters if not.
+  postFor(m, breached = new Set()) {
+    if (this.sheltered) return "shelter";
+    const watch = this.onWatch(m);
+    const sec = watch ? m.section : m.quarters;
+    if (this.evacuated.has(sec) || breached.has(sec)) return "shelter";
+    return watch ? "station" : "quarters";
+  }
+  // Send everyone not in sickbay where the standing orders say. The
+  // critically injured go nowhere but the shelter. Returns how many moved.
+  settle(breached = []) {
+    const b = new Set(breached);
+    let n = 0;
+    for (const m of this.crew) {
+      if (m.health <= 0 || m.location === "sickbay") continue;
+      const to = this.postFor(m, b);
+      if (statusOf(m) === "critical" && to !== "shelter") continue;
+      if (to !== m.location) { m.location = to; n++; }
+    }
+    return n;
   }
 
   get total() { return this.crew.length; }
@@ -119,25 +195,51 @@ export class Roster {
     return c;
   }
   // Where someone actually is right now (a hull section, or the shelter).
-  whereIs(m) { return m.location === "station" ? m.section : m.location === "sickbay" ? SICKBAY : "shelter"; }
+  whereIs(m) {
+    return m.location === "station" ? m.section : m.location === "quarters" ? m.quarters : m.location === "sickbay" ? SICKBAY : "shelter";
+  }
 
-  // Fit crew at their posts as a share of the department, 0..1.
-  // Fit, skilled crew at their posts against the department's full
-  // complement — 1.0 is a full department of proficient people. Reassigned
-  // crew count where they're working now, at their skill there.
+  // Fit, skilled, rested crew at their posts against what a watch needs —
+  // 1.0 is a full watch of proficient people. Reassigned crew count where
+  // they're working now, at their skill there. With all hands called the
+  // whole department is there, but it's still judged against one watch.
   staffing(dept) {
     const core = CORE_SKILL[dept];
     let sum = 0;
     for (const m of this.crew) {
       if (m.dept !== dept || m.location !== "station") continue;
-      sum += FITNESS[statusOf(m)] * skillWeight(skillLevel(m.profile, core));
+      sum += FITNESS[statusOf(m)] * skillWeight(this.levelIn(m, core)) * effectiveness(m.fatigue);
     }
-    return Math.min(STAFFING_MAX, sum / DEPARTMENTS[dept].size);
+    return Math.min(STAFFING_MAX, sum / Math.max(1, this.need[dept][this.shift]));
   }
   // The multiplier a department's system runs at.
   factor(dept) { return AUTOMATION + (1 - AUTOMATION) * this.staffing(dept); }
   // Skill level (0–5) of someone in a department's core skill.
-  skillIn(m, dept) { return skillLevel(m.profile, CORE_SKILL[dept]); }
+  skillIn(m, dept) { return this.levelIn(m, CORE_SKILL[dept]); }
+  // Fit people of `depts` at their posts, and how much work each is good
+  // for at a job using `skill`: [{ m, w }]. For repair parties (ship.js).
+  workers(depts, skill) {
+    const out = [];
+    for (const m of this.crew) {
+      if (!depts.includes(m.dept) || m.location !== "station") continue;
+      const w = FITNESS[statusOf(m)] * effectiveness(m.fatigue) * (0.5 + 0.15 * this.levelIn(m, skill));
+      if (w > 0) out.push({ m, w });
+    }
+    return out;
+  }
+  // Share `xp` of practice in `skill` among workers, by how much each did.
+  credit(workers, skill, xp, t = 0) {
+    const total = workers.reduce((a, x) => a + x.w, 0);
+    if (total <= 0 || xp <= 0) return;
+    for (const { m, w } of workers) this._practise(m, skill, (xp * w) / total, t);
+  }
+  _practise(m, skill, xp, t) {
+    if (!skillById[skill] || xp <= 0) return;
+    const before = this.levelIn(m, skill);
+    m.xp[skill] = (m.xp[skill] ?? 0) + xp * learnRate(skill);
+    const after = this.levelIn(m, skill);
+    if (after > before) this.events.push({ t, kind: "level", id: m.id, skill, level: after });
+  }
 
   // Move someone to work in another department. The career records it in
   // their file (career.js reassign); this moves them now.
@@ -146,7 +248,8 @@ export class Roster {
     if (!m || m.health <= 0) return null;
     m.dept = dept;
     m.section = DEPARTMENTS[dept].section;
-    if (m.location === "station" || m.location === "shelter") m.location = this.sheltered ? "shelter" : "station";
+    m.watchRates = watchPerHour(m.profile, dept);
+    if (m.location !== "sickbay" && statusOf(m) !== "critical") m.location = this.postFor(m);
     return m;
   }
   find(id) { return this.crew.find((m) => m.id === id); }
@@ -154,23 +257,51 @@ export class Roster {
   // ---------------- orders ----------------
   shelterAll() {
     this.sheltered = true;
-    for (const m of this.crew) if (m.health > 0 && m.location === "station") m.location = "shelter";
+    this.settle();
   }
+  // Clear a section to the shelter — whoever's at a post or in quarters
+  // there — and keep it clear until `resume stations`.
   shelterSection(section) {
+    this.evacuated.add(section);
     let n = 0;
     for (const m of this.crew) {
-      if (m.health > 0 && m.location === "station" && m.section === section) { m.location = "shelter"; n++; }
+      if (m.health > 0 && (m.location === "station" || m.location === "quarters") && this.whereIs(m) === section) { m.location = "shelter"; n++; }
     }
     return n;
   }
-  // `breached`: sections open to space — their crew stay in shelter.
+  // Lift shelter and evacuation orders: everyone back to their post or
+  // quarters. `breached`: sections open to space — their crew stay in
+  // shelter. Returns how many left the shelter.
   resumeStations(breached = []) {
     this.sheltered = false;
-    let n = 0;
-    for (const m of this.crew) {
-      if (m.health > 0 && m.location === "shelter" && statusOf(m) !== "critical" && !breached.includes(m.section)) { m.location = "station"; n++; }
-    }
-    return n;
+    this.evacuated.clear();
+    const inShelter = () => this.crew.filter((m) => m.health > 0 && m.location === "shelter").length;
+    const before = inShelter();
+    this.settle(breached);
+    return before - inShelter();
+  }
+  // Everyone to their stations, whatever their watch. Returns how many came.
+  callAllHands(breached = []) {
+    this.allHands = true;
+    const before = this.atStations();
+    this.settle(breached);
+    return this.atStations() - before;
+  }
+  // Back to the watch rotation: the off-watch go to quarters to rest.
+  // Returns how many went.
+  standDown(breached = []) {
+    this.allHands = false;
+    const before = this.atStations();
+    this.settle(breached);
+    return before - this.atStations();
+  }
+  atStations() { return this.crew.filter((m) => m.health > 0 && m.location === "station").length; }
+  // Off-watch crew of a department who could come to their posts.
+  offWatch(dept) { return this.crew.filter((m) => m.dept === dept && m.location === "quarters" && statusOf(m) !== "critical"); }
+  // Average fatigue of the people at their posts.
+  stationFatigue() {
+    const at = this.crew.filter((m) => m.health > 0 && m.location === "station");
+    return at.length ? at.reduce((a, m) => a + m.fatigue, 0) / at.length : 0;
   }
   sendInjured() {
     let n = 0;
@@ -185,6 +316,19 @@ export class Roster {
   // `ship`: the ShipSystems doing the stepping. `t`: mission time (s).
   step(dt, ship, t) {
     const breached = new Set(ship.breached());
+    // ---- the clock, and the watch changing over ----
+    const hours = (dt * CLOCK_RATE) / 3600;
+    this.clock.hour += hours;
+    if (this.clock.hour >= 24) { this.clock.hour -= 24; this.clock.day += 1; }
+    if (this.shift !== this._shift) {
+      this._shift = this.shift;
+      this.settle([...breached]);
+      this.events.push({ t, kind: "watch", shift: this.shift });
+    }
+    // A breach sealed: whoever was kept out of that section can go back.
+    if ((this._breached ?? []).some((sec) => !breached.has(sec))) this.settle([...breached]);
+    this._breached = [...breached];
+    const mentored = new Set(this.crew.filter((m) => m.health > 0 && m.mentor).map((m) => m.homeDept));
     const exposed = (sec) => sec !== "shelter" && ship.hull[sec] < 0.5;
     const sickbayOk = !breached.has(SICKBAY);
     const medical = this.factor("medical");
@@ -222,6 +366,19 @@ export class Roster {
       }
       if (m.health > ceiling) m.health = Math.max(ceiling, m.health - 0.001 * dt);
 
+      // ---- fatigue and practice ----
+      if (m.location === "station") {
+        m.fatigue = Math.min(1, m.fatigue + TIRE * hours);
+        const k = hours * (ship.strain?.(m.dept) ?? 1);
+        for (const [sk, r] of Object.entries(m.watchRates)) this._practise(m, sk, r * k * this._mentorBonus(m, sk, mentored), t);
+      } else {
+        m.fatigue = Math.max(0, m.fatigue - (m.location === "quarters" ? REST : REST_POORLY) * hours);
+        if (m.location === "quarters") {
+          const k = hours / OFF_WATCH_HOURS;
+          for (const [sk, r] of Object.entries(m.routineRates)) this._practise(m, sk, r * k * this._mentorBonus(m, sk, mentored), t);
+        }
+      }
+
       const now = statusOf(m);
       if (now === "dead") {
         m.diedAt = t;
@@ -230,23 +387,40 @@ export class Roster {
         if (now === "critical" && before !== "critical") this.events.push({ t, kind: "critical", id: m.id });
         // The critically injured are carried to sickbay — unless everyone's
         // sheltering, or sickbay itself is open to space.
-        if (now === "critical" && m.location === "station" && sickbayOk && !this.sheltered) m.location = "sickbay";
-        // Back to work once treated — unless their post is open to space.
-        if (now === "healthy" && m.location === "sickbay" && !this.sheltered && !breached.has(m.section)) m.location = "station";
+        if (now === "critical" && (m.location === "station" || m.location === "quarters") && sickbayOk && !this.sheltered) m.location = "sickbay";
+        // Back to work (or rest) once treated — unless that's open to space.
+        if (now === "healthy" && m.location === "sickbay") m.location = this.postFor(m, breached);
       }
     }
     this.worstEta = worst;
     if (this.events.length > 200) this.events.splice(0, this.events.length - 200);
   }
 
+  _mentorBonus(m, skill, mentored) {
+    return skill === CORE_SKILL[m.homeDept] && !m.mentor && mentored.has(m.homeDept) ? MENTOR_BONUS : 1;
+  }
+
   snapshot() {
     return {
-      crew: this.crew.map((m) => ({ ...m, status: statusOf(m), where: this.whereIs(m), skill: this.skillIn(m, m.dept) })),
+      // A plain copy for the UI: no profile (it's in the career) or rate tables.
+      crew: this.crew.map((m) => {
+        const { profile, watchRates, routineRates, ...rest } = m;
+        return {
+          ...rest, xp: { ...m.xp }, status: statusOf(m), where: this.whereIs(m), onWatch: this.onWatch(m),
+          skill: this.skillIn(m, m.dept), eff: effectiveness(m.fatigue),
+        };
+      }),
       counts: this.counts(),
       total: this.total,
       sheltered: this.sheltered,
+      allHands: this.allHands,
+      evacuated: [...this.evacuated],
+      clock: { ...this.clock },
+      shift: this.shift,
       worstEta: this.worstEta,
+      fatigue: this.stationFatigue(),
       staffing: Object.fromEntries(DEPT_ORDER.map((d) => [d, this.staffing(d)])),
+      need: Object.fromEntries(DEPT_ORDER.map((d) => [d, this.need[d][this.shift]])),
     };
   }
 }

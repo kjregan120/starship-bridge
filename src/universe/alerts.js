@@ -9,10 +9,11 @@
 // The computer voice, the dashboard's priority panel and the red-alert
 // visuals all read the same list, so they never disagree about what matters.
 
-import { DEPARTMENTS, DEPT_ORDER, causeWords, spokenRank } from "./crew.js";
+import { DEPARTMENTS, DEPT_ORDER, causeWords, spokenRank, effectiveness } from "./crew.js";
 import { PRONOUNS } from "./personnel/profile.js";
 
 const pct = (x) => `${Math.round(x * 100)} percent`;
+const cap = (s) => s[0].toUpperCase() + s.slice(1);
 export function fmtEta(s) {
   if (s == null || !isFinite(s)) return null;
   const t = Math.max(0, Math.round(s));
@@ -92,11 +93,32 @@ export function assessThreats(ship) {
       if (!dep.system) continue;
       const st = r.staffing(d);
       if (st >= 0.5) continue;
-      const fit = Math.round(st * dep.size);
+      // Off-watch hands who could come and cover, or people kept in
+      // shelter by an evacuation order.
+      const off = r.allHands ? 0 : r.offWatch(d).length;
+      const held = r.evacuated.size ? r.crew.filter((m) => m.dept === d && m.health > 0 && m.location === "shelter").length : 0;
+      const action = off ? "call all hands" : held ? "resume stations" : null;
       add({
-        id: `staff-${d}`, level: "yellow", sev: 44, title: `${dep.label} short-handed — ${fit} of ${dep.size} fit`,
-        detail: `${dep.effect} reduced`, eta: null, action: null,
-        say: `${dep.label} is short-handed. ${dep.effect} reduced.`,
+        id: `staff-${d}`, level: "yellow", sev: 44, title: `${dep.label} short-handed — ${Math.round(st * 100)}% of a watch`,
+        detail: `${dep.effect} reduced${off ? ` · ${off} off watch` : held ? ` · ${held} in shelter` : ""}`, eta: null, action,
+        say: `${dep.label} is short-handed. ${dep.effect} reduced.` +
+          (off ? " Recommend calling all hands." : held ? " Recommend crew return to stations." : ""),
+      });
+    }
+  }
+  if (r.allHands && !r.sheltered) {
+    const tired = r.stationFatigue();
+    const busy = Object.values(ship.repairs ?? {}).some((x) => x.rate > 0);
+    if (tired > 0.55) {
+      add({
+        id: "fatigue", level: "yellow", sev: 38, title: `Crew tiring — ${Math.round(effectiveness(tired) * 100)}% effective`,
+        detail: "All hands at stations", eta: null, action: "stand down",
+        say: "The crew are tiring. Recommend standing down to normal watches.",
+      });
+    } else if (!busy && !T.some((t) => t.level === "red")) {
+      add({
+        id: "all-hands", level: "yellow", sev: 15, title: "All hands at stations", detail: "Nothing to repair",
+        eta: null, action: "stand down", say: "",
       });
     }
   }
@@ -132,9 +154,13 @@ export function assessThreats(ship) {
   const breaches = ship.breached();
   if (breaches.length) {
     const eta = ship.eta("pressure");
+    // How long damage control needs to seal the worst of them.
+    const rep = ship.repairs?.[breaches[0]];
+    const seal = rep?.rate > 0 ? (0.3 - ship.hull[breaches[0]]) / rep.rate : null;
     add({
       id: "breach", level: "red", sev: 86, title: `Hull breach — ${breaches.join(", ")}`,
-      detail: `Pressure ${ship.atmo.pressure.toFixed(2)} atm`, eta, action: breachedHere.length ? `evacuate ${breachedHere[0]}` : null,
+      detail: `Pressure ${ship.atmo.pressure.toFixed(2)} atm${seal != null ? ` · sealing ${breaches[0]} in ${fmtEta(seal)}` : rep?.blocked ? ` · ${rep.blocked}` : ""}`,
+      eta, action: breachedHere.length ? `evacuate ${breachedHere[0]}` : !r.allHands && !r.sheltered ? "call all hands" : null,
       say: `Hull breach, ${breaches.join(" and ")} section${breaches.length > 1 ? "s" : ""}. Cabin pressure falling.` +
         (eta != null ? ` Atmosphere lost${sayEta(eta)}.` : ""),
     });
@@ -215,13 +241,36 @@ export function assessThreats(ship) {
     });
   }
 
+  // ---- faults: wear and tear breaking things (faults.js) ----
+  const faults = ship.wear?.cause ?? {};
+  for (const [c, name] of Object.entries(faults)) {
+    const v = ship.health[c], rep = ship.repairs?.[c], spreading = ship.wear.active[c];
+    const blocked = rep?.blocked;
+    const red = spreading && (blocked || v < 0.3);
+    const Label = cap(COMPONENT_NAME[c]);
+    add({
+      id: `fault-${c}`, level: red ? "red" : "yellow", sev: red ? 76 : spreading ? 50 : 32,
+      title: `Fault — ${Label}: ${name}`,
+      detail: `${Label} ${Math.round(v * 100)}%` +
+        (spreading ? ` · spreading · ${Math.round(Math.min(1, spreading.done / spreading.work) * 100)}% contained` : "") +
+        (blocked ? ` · ${blocked}` : rep?.crew ? ` · ${rep.crew} on it` : ""),
+      eta: null,
+      action: blocked && !ship.roster.allHands ? "call all hands" : ship.repairFocus === c ? null : `repair ${c}`,
+      say: `${Label} fault. ${cap(name)}.` + (spreading ? " Damage is spreading." : "") +
+        (blocked ? ` ${cap(blocked)}.` : ""),
+    });
+  }
+
   // ---- slower problems ----
-  const broken = Object.entries(ship.health).filter(([, v]) => v < 0.4).sort((a, b) => a[1] - b[1]);
+  const broken = Object.entries(ship.health).filter(([k, v]) => v < 0.4 && !faults[k]).sort((a, b) => a[1] - b[1]);
   if (broken.length) {
     const names = broken.map(([k]) => COMPONENT_NAME[k]);
+    const worst = broken[0][0];
+    const blocked = ship.repairs?.[worst]?.blocked;
     add({
       id: "damage", level: "yellow", sev: 40, title: `Damage — ${names.join(", ")}`,
-      detail: broken.map(([k, v]) => `${COMPONENT_NAME[k]} ${Math.round(v * 100)}%`).join(" · "), eta: null, action: null,
+      detail: broken.map(([k, v]) => `${COMPONENT_NAME[k]} ${Math.round(v * 100)}%`).join(" · ") + (blocked ? ` · repairs stalled: ${blocked}` : ""),
+      eta: null, action: ship.repairFocus === worst ? null : `repair ${worst}`,
       say: `Damage report. ${names.join(", ")} ${broken.length > 1 ? "are" : "is"} critically damaged.`,
     });
   }

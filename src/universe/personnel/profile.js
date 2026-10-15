@@ -5,7 +5,9 @@
 //   schemaVersion          bump + add a migration (schema.js) when the shape changes
 //   id                     permanent, never reused
 //   identity               { first, last, pronouns, birthDay, birthplace }
-//   post                   { slot, dept, rank, role, duty, assignedDept }
+//   post                   { slot, dept, rank, role, duty, assignedDept, shift, crossTrain }
+//                          shift: "alpha"|"beta"|"gamma" — the watch they stand
+//                          crossTrain: a skill they're deliberately learning, or null
 //   joinedFleetDay, joinedShipDay
 //   education              [{ institution, field, degree, day }]
 //   skills                 { [skillId]: { xp } } — level derived (skills.js LEVEL_XP)
@@ -19,7 +21,7 @@
 //   status                 { state: "active"|"deceased"|"transferred", day, cause }
 //   stats                  { missions }
 //   timeline               [{ day, type, text, data }] — append-only history
-//   ext                    {} — free space for future modules (learning, shifts...)
+//   ext                    {} — free space for future modules
 //
 // The timeline is the record of everything that happened; record() appends
 // an event AND applies it to the sections above (applyEvent). A profile's
@@ -36,7 +38,7 @@ import { SERVICE_YEARS, ENTRY_AGE } from "./data/complement.js";
 import { PLACES, SCHOOLS, FIELDS, SHIPS, OCCUPATIONS, INCIDENTS, ALLERGIES, CONDITIONS, BLOOD_TYPES } from "./data/names.js";
 import { YEAR, dateOf, yearOf, yearsBetween } from "./util.js";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 export const skillById = Object.fromEntries(SKILLS.map((s) => [s.id, s]));
 export const dutyById = Object.fromEntries(DUTIES.map((d) => [d.id, d]));
 export const activityById = Object.fromEntries(ACTIVITIES.map((a) => [a.id, a]));
@@ -69,6 +71,19 @@ export function applyEvent(p, e) {
       s.xp += d.xp;
       break;
     }
+    // A stretch of practice — a mission, or the routine between missions —
+    // as one entry: { xp: { [skill]: n } }.
+    case "practice":
+      for (const [k, n] of Object.entries(d.xp ?? {})) (p.skills[k] ??= { xp: 0 }).xp += n;
+      break;
+    case "cross-train":
+      p.post.crossTrain = d.skill;
+      if (d.skill && !p.schedule.some((x) => x.activity === "cross-training")) {
+        const a = activityById["cross-training"];
+        p.schedule.push({ activity: a.id, cadence: a.cadence, hours: a.hours });
+      }
+      break;
+    case "shift": p.post.shift = d.shift; break;
     case "reassigned": p.post.assignedDept = d.dept === p.post.dept ? null : d.dept; break;
     case "mission": p.stats.missions += 1; break;
     case "health": p.medical.health = d.health; break;
@@ -207,7 +222,7 @@ export function generateProfile(r, id, post, today, names, firstPool, lastPool) 
   };
   const pronouns = r.chance(0.08) ? "they" : r.chance(0.5) ? "she" : "he";
   p.identity = { first: pickName(firstPool, names.first), last: pickName(lastPool, names.last), pronouns, birthDay, birthplace: r.pick(PLACES) };
-  p.post = { slot: post.slot, dept: post.dept, rank: post.rank, role: post.role, duty: post.duty, assignedDept: null };
+  p.post = { slot: post.slot, dept: post.dept, rank: post.rank, role: post.role, duty: post.duty, assignedDept: null, shift: post.shift, crossTrain: null };
   // Started empty so the history below can record injuries and doses into
   // it; filled in at the end.
   p.medical = { injuries: [], lifetimeDoseSv: 0 };
@@ -376,6 +391,63 @@ export function activityTrains(p, activityId) {
   if (!a) return [];
   return a.trains.map((t) => ({
     ...t,
-    skill: t.skill === "$core" ? CORE_SKILL[p.post.dept] : t.skill === "$secondary" ? secondarySkill(p) : t.skill,
+    skill: t.skill === "$core" ? CORE_SKILL[p.post.dept] : t.skill === "$secondary" ? p.post.crossTrain ?? secondarySkill(p) : t.skill,
   })).filter((t) => t.skill);
+}
+
+// ---- learning by doing -------------------------------------------------------
+// Practice turns into skill: xp × the skill's learn rate (skills.js). Two
+// sources: standing a watch (their duties, by the hour), and the rest of
+// their routine (training, drills, maintenance — the schedule, by the day).
+// The routine runs between missions (career.js) and off watch during one
+// (crew.js); watch hours only accrue on watch, and count for more when the
+// department is under strain.
+const PER_DAY = { shift: 1, daily: 1, weekly: 1 / 7, monthly: 1 / 30 };
+const WATCH_XP_PER_HOUR = 0.25;          // a duty's 2 xp a session over an 8-hour watch
+export const MENTOR_BONUS = 1.25;        // on core skill, for juniors with a mentor aboard
+export const learnRate = (skill) => skillById[skill]?.learnRate ?? 1;
+export const isMentor = (p) => p.schedule.some((x) => x.activity === "mentoring");
+
+// { [skill]: xp } a day of routine earns, off watch. Duty watches excluded.
+export function routinePerDay(p) {
+  const out = {};
+  for (const x of p.schedule) {
+    if (x.activity.startsWith("duty:")) continue;
+    for (const t of activityTrains(p, x.activity)) out[t.skill] = (out[t.skill] ?? 0) + t.xp * PER_DAY[x.cadence];
+  }
+  return out;
+}
+// { [skill]: xp } an hour on watch earns. Working in another department
+// (reassigned), it's that department's core skill they're learning.
+export function watchPerHour(p, dept = currentDept(p)) {
+  if (dept !== p.post.dept) return { [CORE_SKILL[dept]]: WATCH_XP_PER_HOUR };
+  const out = {};
+  for (const d of p.duties) {
+    const sk = dutyById[d]?.skill;
+    if (sk) out[sk] = (out[sk] ?? 0) + WATCH_XP_PER_HOUR;
+  }
+  return out;
+}
+// Levels a set of gains would carry someone to: [{ skill, level }].
+export function levelUps(p, gains) {
+  const out = [];
+  for (const [k, n] of Object.entries(gains)) {
+    const before = skillLevel(p, k), after = levelOf((p.skills[k]?.xp ?? 0) + n);
+    if (after > before) out.push({ skill: k, level: after });
+  }
+  return out;
+}
+// Record a stretch of practice: one "practice" entry, then one for each
+// level reached. `gains` are raw xp (learn rate already applied); fractions
+// are dropped. Returns the levels reached.
+export function recordPractice(p, day, label, gains) {
+  const xp = {};
+  for (const [k, n] of Object.entries(gains)) if (Math.floor(n) >= 1) xp[k] = Math.floor(n);
+  if (!Object.keys(xp).length) return [];
+  const ups = levelUps(p, xp);
+  const top = Object.entries(xp).sort((a, b) => b[1] - a[1]).slice(0, 3)
+    .map(([k, n]) => `+${n} ${skillById[k]?.label.toLowerCase() ?? k}`).join(", ");
+  record(p, day, "practice", `${label}: ${top}`, { xp });
+  for (const u of ups) record(p, day, "skill-level", `Reached ${LEVEL_NAMES[u.level]} in ${skillById[u.skill]?.label ?? u.skill}`, u);
+  return ups;
 }

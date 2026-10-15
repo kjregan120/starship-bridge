@@ -8,7 +8,7 @@
 // times a second (store.js `ship`) — no Canvas, no per-frame work. The only
 // animation is CSS: the reactor's pulse and the flash where a hit landed.
 import { useUI } from "./store.js";
-import { POWER_SYSTEMS } from "../universe/ship.js";
+import { POWER_SYSTEMS, MAINTENANCE } from "../universe/ship.js";
 import { fmtEta } from "../universe/alerts.js";
 import { HULL_PATHS } from "./shipShape.js";
 
@@ -296,6 +296,41 @@ function Priority() {
   );
 }
 
+// ---- repairs -------------------------------------------------------------------
+// Everything damaged, worst first, with how long the crews need for it at
+// the rate they're working (ship.js _repairStep) or why they can't, and
+// what broke if it was a fault (faults.js) — a spreading one shows how far
+// the crew are with containing it instead of an ETA. Click
+// one to put the crews on it first; click it again to share them out.
+function Repairs({ s }) {
+  const runOrder = useUI((st) => st.runOrder);
+  const items = Object.entries(s.repairs)
+    .map(([k, r]) => ({ k, r, v: k in s.health ? s.health[k] : s.hull[k], label: MAINTENANCE[k]?.label ?? `${k[0].toUpperCase()}${k.slice(1)} hull` }))
+    .sort((a, b) => a.v - b.v);
+  if (!items.length) return <div className="sci-repairs none">NO DAMAGE — REPAIR CREWS STANDING BY</div>;
+  return (
+    <div className="sci-repairs">
+      <div className="sci-panel-title">REPAIRS{s.roster.allHands ? " — ALL HANDS" : " — WATCH CREWS"}</div>
+      {items.map(({ k, r, v, label }) => (
+        <div key={k} className={`sci-repair ${s.repairFocus === k ? "focus" : ""}`}
+          onClick={() => runOrder?.(s.repairFocus === k ? "repair all" : `repair ${k}`)}
+          title={s.repairFocus === k ? "Repair crews on this first — click to share them out again" : "Click to put repair crews on this first"}>
+          <span className="sci-repair-name">
+            {s.repairFocus === k ? "▸ " : ""}{label}
+            {r.fault && <span className={`sci-repair-fault ${r.containing != null ? "spreading" : ""}`}>{r.fault}</span>}
+          </span>
+          <span className="sci-bar"><span className={level(v)} style={{ width: `${v * 100}%` }} /></span>
+          <span className="sci-repair-v">{pct(v)}</span>
+          <span className={`sci-repair-eta ${r.blocked ? "blocked" : ""}`}>
+            {r.blocked ?? (r.containing != null ? `${r.crew} containing · ${Math.round(r.containing * 100)}%`
+              : r.rate > 0 ? `${r.crew} on it · ${fmtEta((1 - v) / r.rate)}` : "—")}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ---- the screen -------------------------------------------------------------
 export default function Science() {
   const s = useUI((st) => st.ship);
@@ -339,6 +374,7 @@ export default function Science() {
           <div className="sci-legend">
             <span className="ok">■ NOMINAL</span><span className="warn">■ DEGRADED</span><span className="crit">■ CRITICAL</span>
           </div>
+          <Repairs s={s} />
         </div>
 
         <div className="sci-col">

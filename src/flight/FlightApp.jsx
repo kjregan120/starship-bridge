@@ -8,11 +8,12 @@ import ViewscreenFX from "./ViewscreenFX.jsx";
 import GameOver from "./GameOver.jsx";
 import { useUI } from "./store.js";
 import { stopListening } from "./commsAudio.js";
-import { sim, ship, career, navList, nearestBody, nearbyObjects, startBodyName, byId } from "./engine.js";
-import { checkpoint, finalizeMission, reassign as reassignInCareer, findByName } from "../universe/personnel/career.js";
-import { fullName, skillLevel, CORE_SKILL, qualifiedDepts } from "../universe/personnel/profile.js";
+import { sim, ship, career, navList, nearestBody, nearbyObjects, startBodyName, byId, view, worldPos } from "./engine.js";
+import { checkpoint, finalizeMission, reassign as reassignInCareer, crossTrain as crossTrainInCareer, findByName } from "../universe/personnel/career.js";
+import { fullName, skillLevel, levelName, skillById, CORE_SKILL, qualifiedDepts } from "../universe/personnel/profile.js";
+import { fmtClock, SHIFT_LABEL } from "../universe/personnel/util.js";
 import { saveCareer, clearCareer } from "./careerStore.js";
-import { POWER_SYSTEMS } from "../universe/ship.js";
+import { POWER_SYSTEMS, MAINTENANCE, HULL_SECTIONS } from "../universe/ship.js";
 import { AlertBoard } from "../universe/alerts.js";
 import { DEPARTMENTS } from "../universe/crew.js";
 import { updateAlarms, setMuted, silenceAlarm } from "./alarms.js";
@@ -37,8 +38,8 @@ const STATIONS = [
 ];
 const STATION_HELP = {
   conn: "CONN — ahead full|half|quarter · reverse full|half|quarter · port|starboard <degrees> · all stop · come about for <name> · warp <1-3> to <name> · warp <1-3> · warp <1-3> route · drop out",
-  science: "SCIENCE — ship status. scan · status for a report · withdraw to pull away from whatever is cooking the ship · reactor <0-120> to set the reactor's output limit (over 100 runs hot) · power <shields|engines|sensors|comms|life> <0-150> to change a system's share · power reset · silence alarm · voice on|off · mute / unmute.",
-  crew: "CREW — the forty aboard. all hands to shelter (radiation shelter, stations unmanned) · resume stations · evacuate <fore|aft|port|starboard> · send injured to sickbay · crew report · file <name> to open a personnel file · reassign <name> to <department> (needs Qualified or better in that department's core skill) · reassign <name> back. Click a section on the deck plan to evacuate it; click a name for their file.",
+  science: "SCIENCE — ship status. scan · status for a report · withdraw to pull away from whatever is cooking the ship · reactor <0-120> to set the reactor's output limit (over 100 runs hot) · power <shields|engines|sensors|comms|life> <0-150> to change a system's share · power reset · repair <reactor|radiators|impulse|warp|emitters|life|comms|sensors|fore|aft|port|starboard> to put repair crews on it first · repair all · silence alarm · voice on|off · mute / unmute.",
+  crew: "CREW — the forty aboard, on three watches (alpha 0800, beta 1600, gamma 0000; a ship hour is a minute). call all hands to bring everyone to their stations (more hands, faster repairs — but they tire) · stand down to go back to watches · all hands to shelter (radiation shelter, stations unmanned) · resume stations · evacuate <fore|aft|port|starboard> · send injured to sickbay · crew report · file <name> to open a personnel file · reassign <name> to <department> (needs Qualified or better in that department's core skill) · reassign <name> back · cross-train <name> in <department> to have them learn it. Click a section on the deck plan to evacuate it; click a name for their file.",
   tactical: "TACTICAL — 3D chart. Drag to rotate, scroll to zoom, right-drag to pan. Shows any plotted course.",
   comms: "COMMS — auto-monitors the nearest contact's signal bands. Press LISTEN to hear a sonification of it. sweep for every contact in range · hail <name> to open a channel · tune <radio|microwave|elements|gravimetric|subspace> to filter toward one band, tune off to clear · decode to attempt to pull a message off the open channel (LISTEN first), decode stop to abort."
 };
@@ -105,6 +106,43 @@ function reassignOrder(name, target) {
     : `${p.post.rank} ${fullName(p)} reassigned to ${label}.`);
 }
 
+// Point someone's cross-training at another department's core skill.
+function crossTrainOrder(name, dept) {
+  const p = findByName(career, name);
+  if (!p) { sim.log("deny", `No one aboard named "${name}".`); return; }
+  if (dept === p.post.dept) { sim.log("deny", `${fullName(p)} already works in ${DEPARTMENTS[dept].label}.`); return; }
+  const skill = CORE_SKILL[dept];
+  if (p.post.crossTrain === skill) { sim.log("info", `${fullName(p)} is already cross-training in ${skillById[skill].label}.`); return; }
+  crossTrainInCareer(career, p.id, dept);
+  saveCareer(career);
+  sim.log("order", `${p.post.rank} ${fullName(p)} to cross-train in ${skillById[skill].label} (now ${levelName(skillLevel(p, skill))}). Qualified is needed to cover ${DEPARTMENTS[dept].label}.`);
+}
+
+// What `repair <x>` can name.
+const REPAIR_ALIAS = {
+  ...Object.fromEntries(Object.keys(MAINTENANCE).map((k) => [k, k])),
+  ...Object.fromEntries(HULL_SECTIONS.map((k) => [k, k])),
+  shields: "emitters", shield: "emitters", emitter: "emitters", "life support": "life", radiator: "radiators",
+  engines: "impulse", "impulse drive": "impulse", coils: "warp", "warp coils": "warp", sensor: "sensors", comm: "comms",
+};
+function repairOrder(what) {
+  // "the port hull", "hull port", "port section" → "port"
+  const w = what.replace(/^the\s+/, "").replace(/^hull\s+|\s+(?:section|hull)$/g, "").trim();
+  if (/^(all|auto|everything|reset)$/.test(w)) {
+    ship.setRepairFocus(null);
+    sim.log("order", "Repair crews working on everything, worst first.");
+    return;
+  }
+  const k = REPAIR_ALIAS[w];
+  if (!k) { sim.log("deny", `Nothing called "${what}" to repair. Try ${Object.keys(MAINTENANCE).join(", ")}, or a hull section.`); return; }
+  const v = k in ship.health ? ship.health[k] : ship.hull[k];
+  const label = MAINTENANCE[k]?.label ?? `${k[0].toUpperCase()}${k.slice(1)} hull`;
+  if (v >= 0.999) { sim.log("info", `${label} needs no repair.`); return; }
+  ship.setRepairFocus(k);
+  const who = MAINTENANCE[k] ? DEPARTMENTS[MAINTENANCE[k].dept].label : "Damage control";
+  sim.log("order", `${who}: ${label.toLowerCase()} first (${Math.round(v * 100)}%).${ship.roster.allHands ? "" : " Call all hands for more hands on it."}`);
+}
+
 // Save the mission's state into the career as the page closes — so what
 // happened still happened, even if the tab is shut mid-crisis.
 function saveOnExit() {
@@ -116,6 +154,7 @@ function crewReport() {
   const r = ship.roster;
   const c = r.counts();
   sim.log("info", `Crew — ${r.total - c.dead} of ${r.total} alive: ${c.healthy} fit, ${c.injured} injured, ${c.critical} critical, ${c.dead} lost.${r.sheltered ? " All hands in shelter." : ""}`);
+  sim.log("info", `  ${fmtClock(r.clock.hour)} hours, ${SHIFT_LABEL[r.shift]} watch. ${r.allHands ? `All hands at stations — ${Math.round((1 - r.stationFatigue()) * 100)}% rested.` : `${r.atStations()} at their posts.`}`);
   const short = Object.entries(DEPARTMENTS).filter(([d, dep]) => dep.system && r.staffing(d) < 0.7)
     .map(([d, dep]) => `${dep.label} ${Math.round(r.staffing(d) * 100)}%`);
   if (short.length) sim.log("info", `  Short-handed: ${short.join(", ")}.`);
@@ -149,10 +188,28 @@ function handleCommand(text) {
     sim.log("order", "All hands to radiation shelter. Stations on automation.");
     return;
   }
-  if (/^(resume stations|return to stations|all hands to stations|stations)$/.test(t)) {
+  if (/^(call all hands|all hands|all hands to stations|general quarters|battle stations)$/.test(t)) {
+    if (ship.roster.sheltered) { sim.log("deny", "All hands are in shelter. Resume stations first."); return; }
+    if (ship.roster.allHands) { sim.log("info", "All hands are already at their stations."); return; }
+    const n = ship.roster.callAllHands(ship.breached());
+    sim.log("order", `All hands to stations — ${n} off-watch crew reporting. They'll tire; stand down when it's over.`);
+    return;
+  }
+  if (/^(stand down|normal watches|resume watches|secure from general quarters)$/.test(t)) {
+    if (!ship.roster.allHands) { sim.log("info", "The ship is already on normal watches."); return; }
+    const n = ship.roster.standDown(ship.breached());
+    sim.log("order", `Standing down — ${SHIFT_LABEL[ship.roster.shift]} watch keeps the ship, ${n} to quarters to rest.`);
+    return;
+  }
+  if ((m = t.match(/^repair\s+(.+)$/))) { repairOrder(m[1]); return; }
+  if ((m = t.match(/^cross[- ]?train\s+(.+?)\s+(?:in|on|for|to)\s+(command|helm|science|comms|engineering|tactical|security|medical|operations)$/))) {
+    crossTrainOrder(m[1], m[2]);
+    return;
+  }
+  if (/^(resume stations|return to stations|stations)$/.test(t)) {
     const breached = ship.breached();
     const n = ship.roster.resumeStations(breached);
-    sim.log("order", (n ? `${n} crew returning to stations.` : "No one to return to stations.") +
+    sim.log("order", (n ? `${n} crew leaving shelter for their stations and quarters.` : "No one to return to stations.") +
       (breached.length ? ` ${breached.join(", ")} section${breached.length > 1 ? "s" : ""} breached — crew there stay in shelter.` : ""));
     return;
   }
@@ -314,7 +371,7 @@ function handleCommand(text) {
 // everything else is read on the Science screen.
 const stationFor = (t) =>
   t.action === "withdraw" ? "conn" :
-  t.id === "crew" || t.id === "sheltered" || t.id.startsWith("staff-") || /shelter|evacuate|sickbay|stations/.test(t.action ?? "") ? "crew" :
+  t.id === "crew" || t.id === "sheltered" || t.id.startsWith("staff-") || /shelter|evacuate|sickbay|stations|all hands|stand down/.test(t.action ?? "") ? "crew" :
   "science";
 const board = new AlertBoard();
 const missionStart = performance.now();
@@ -444,6 +501,11 @@ export default function FlightApp() {
       <main className={`fstage ${shake ? "shake" : ""}`}>
         <header className="fstatus">
           <span className="ship">USS Meridian</span>
+          {shipSnap && (
+            <span className="clock" title="Ship's clock — a ship hour passes every real minute">
+              {fmtClock(shipSnap.roster.clock.hour)} · {shipSnap.roster.allHands ? "ALL HANDS" : `${SHIFT_LABEL[shipSnap.roster.shift].toUpperCase()} WATCH`}
+            </span>
+          )}
           <span className="sys">◊ {systemName}</span>
           {alert.level !== "green" && !lost && (
             <span className={`alert-banner ${alert.level}`}>{alert.level === "red" ? "RED ALERT" : "YELLOW ALERT"}</span>
