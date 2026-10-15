@@ -9,6 +9,7 @@ import { AlertBoard, assessThreats } from "./alerts.js";
 import { newCareer, crewProfiles, startMission, checkpoint, reassign, crossTrain, finalizeMission } from "./personnel/career.js";
 import { ageOn, skillLevel, qualifiedDepts, CORE_SKILL } from "./personnel/profile.js";
 import { migrateCareer } from "./personnel/schema.js";
+import { parseMagnify, clampZoom, MAX_ZOOM } from "../flight/lens.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const universe = JSON.parse(readFileSync(join(here, "universe.json"), "utf8"));
@@ -467,6 +468,24 @@ console.log("\n13. Wear and tear");
   run(full, 300); run(thin, 300);
   check(`an unmanned department's systems wear faster`, thin.wear.wear.comms - w0 > 1.3 * (full.wear.wear.comms - w0),
     `${(thin.wear.wear.comms - w0).toFixed(3)} vs ${(full.wear.wear.comms - w0).toFixed(3)}`);
+}
+
+console.log("\n14. The magnify order");
+{
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const cases = [
+    ["", {}], ["off", { reset: true }], ["reset", { reset: true }],
+    ["in", { step: 2 }], ["out", { step: 0.5 }],
+    ["4", { zoom: 4 }], ["x4", { zoom: 4 }], ["4x", { zoom: 4 }], ["2.5", { zoom: 2.5 }], ["400%", { zoom: 4 }],
+    ["ahead", { ahead: true }],
+    ["Erebus", { target: "Erebus" }], ["on Erebus", { target: "Erebus" }], ["at Altair 70", { target: "Altair 70" }],
+    ["6 on Erebus", { zoom: 6, target: "Erebus" }], ["x6 Erebus", { zoom: 6, target: "Erebus" }],
+    ["4 xeno", { zoom: 4, target: "xeno" }], ["4x xeno", { zoom: 4, target: "xeno" }],
+    ["on", { error: "on" }],
+  ];
+  for (const [rest, want] of cases)
+    check(`magnify "${rest}" → ${JSON.stringify(want)}`, same(parseMagnify(rest), want), JSON.stringify(parseMagnify(rest)));
+  check(`zoom is clamped to 1–${MAX_ZOOM}`, clampZoom(0.2) === 1 && clampZoom(50) === MAX_ZOOM && clampZoom(3) === 3);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

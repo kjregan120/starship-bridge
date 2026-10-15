@@ -7,6 +7,7 @@ import { useUI } from "./store.js";
 import { makeStarMaterials, CORONA_EXTENT } from "./starShader.js";
 import { makeFlareLoops } from "./flareLoops.js";
 import { ejecta } from "./ejecta.js";
+import { lens, BASE_FOV } from "./lens.js";
 import { makePlanetParts, AURORA_EXTENT } from "./planetShader.js";
 
 // How far out a star system's planets/moons start rendering as real (if tiny)
@@ -378,22 +379,46 @@ function WarpStreaks() {
 }
 
 // ---- camera rig: first-person at the ship --------------------------------
+// Magnification (lens.js) narrows the fov, and a held target swings the view
+// off the bow onto it — both eased, so a `magnify` order pans and zooms
+// rather than cuts.
+const ZOOM_RATE = 4; // 1/s — about 95% of the way there in 0.75s
+const SNAP_COS = Math.cos((0.5 * Math.PI) / 180); // within half a degree of ahead → lock to it
 function CameraRig() {
   const { camera } = useThree();
-  useFrame(() => {
+  const look = useMemo(() => new THREE.Vector3(...view.facing), []);
+  const want = useMemo(() => new THREE.Vector3(), []);
+  useFrame((_, dt) => {
     const f = view.facing;
+    const k = 1 - Math.exp(-ZOOM_RATE * dt);
+    const target = lens.targetId && sim.byId[lens.targetId];
+    if (target) {
+      const p = rel(worldPos(target));
+      want.set(p[0], p[1], p[2]).normalize();
+    } else {
+      want.set(f[0], f[1], f[2]);
+    }
+    // Ahead with no target and already (nearly) there: lock on, so ordinary
+    // turns track the heading exactly, as they did before there was a lens.
+    if (!target && look.dot(want) > SNAP_COS) look.copy(want);
+    else look.lerp(want, k).normalize();
     // Roll about the view axis after lookAt (local +Z points back at the
     // viewer, so + rotates the horizon clockwise = leaning to port).
     camera.position.set(0, 0, 0);
-    camera.lookAt(f[0] * 10, f[1] * 10, f[2] * 10);
+    camera.lookAt(look.x * 10, look.y * 10, look.z * 10);
     camera.rotateZ(view.bank);
+    const fov = BASE_FOV / lens.zoom;
+    if (Math.abs(camera.fov - fov) > 1e-3) {
+      camera.fov += (fov - camera.fov) * k;
+      camera.updateProjectionMatrix();
+    }
   });
   return null;
 }
 
 export default function Scene() {
   return (
-    <Canvas camera={{ position: [0, 0, 0], fov: 60, near: 0.05, far: 4000 }}>
+    <Canvas camera={{ position: [0, 0, 0], fov: BASE_FOV / lens.zoom, near: 0.05, far: 4000 }}>
       <color attach="background" args={["#01010a"]} />
       <ambientLight intensity={0.08} />
       <CameraRig />

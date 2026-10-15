@@ -46,6 +46,11 @@ export const useUI = create((set) => ({
   // does — decodeEngine.js owns the countdown outside React, the same way
   // commsAudio.js owns the audio nodes, so it survives switching stations.
   decoding: null,
+  // The main viewer's magnification and target — a copy of lens.js's `lens`
+  // for the HUD.
+  // lens.js holds the real value (CameraRig reads it every frame); the
+  // `magnify` order in FlightApp.jsx updates both.
+  lens: { zoom: 1, targetId: null, targetName: null },
 
   setSnapshot: (snapshot) => set({ snapshot }),
   setNearest: (nearest) => set({ nearest }),
@@ -59,5 +64,6 @@ export const useUI = create((set) => ({
   setPersonnel: (personnelId) => set({ personnelId }),
   setListening: (listening) => set({ listening }),
   setTunedBand: (tunedBand) => set({ tunedBand }),
-  setDecoding: (decoding) => set({ decoding })
+  setDecoding: (decoding) => set({ decoding }),
+  setLens: (lens) => set({ lens: { ...lens } })
 }));

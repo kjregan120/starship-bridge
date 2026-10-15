@@ -22,6 +22,7 @@ import { signalProfile, decodeMessage } from "../universe/signals.js";
 import { tuneFilterTo } from "./audio.js";
 import { startDecode, abortDecode } from "./decodeEngine.js";
 import { startSimLoop } from "./loop.js";
+import { lens, parseMagnify, clampZoom, MAX_ZOOM, MAX_ARC } from "./lens.js";
 import "./flight.css";
 
 const THROTTLE = { full: 1, standard: 0.75, half: 0.5, third: 0.33, quarter: 0.25 };
@@ -37,7 +38,7 @@ const STATIONS = [
   { id: "comms", label: "COMMS" }
 ];
 const STATION_HELP = {
-  conn: "CONN — ahead full|half|quarter · reverse full|half|quarter · port|starboard <degrees> · all stop · come about for <name> · warp <1-3> to <name> · warp <1-3> · warp <1-3> route · drop out",
+  conn: "CONN — ahead full|half|quarter · reverse full|half|quarter · port|starboard <degrees> · all stop · come about for <name> · warp <1-3> to <name> · warp <1-3> · warp <1-3> route · drop out · magnify <1-10> · magnify in|out · magnify [<1-10>] on <name> to hold the viewer on a contact · magnify ahead · magnify off",
   science: "SCIENCE — ship status. scan · status for a report · withdraw to pull away from whatever is cooking the ship · reactor <0-120> to set the reactor's output limit (over 100 runs hot) · power <shields|engines|sensors|comms|life> <0-150> to change a system's share · power reset · repair <reactor|radiators|impulse|warp|emitters|life|comms|sensors|fore|aft|port|starboard> to put repair crews on it first · repair all · silence alarm · voice on|off · mute / unmute.",
   crew: "CREW — the forty aboard, on three watches (alpha 0800, beta 1600, gamma 0000; a ship hour is a minute). call all hands to bring everyone to their stations (more hands, faster repairs — but they tire) · stand down to go back to watches · all hands to shelter (radiation shelter, stations unmanned) · resume stations · evacuate <fore|aft|port|starboard> · send injured to sickbay · crew report · file <name> to open a personnel file · reassign <name> to <department> (needs Qualified or better in that department's core skill) · reassign <name> back · cross-train <name> in <department> to have them learn it. Click a section on the deck plan to evacuate it; click a name for their file.",
   tactical: "TACTICAL — 3D chart. Drag to rotate, scroll to zoom, right-drag to pan. Shows any plotted course.",
@@ -143,6 +144,100 @@ function repairOrder(what) {
   sim.log("order", `${who}: ${label.toLowerCase()} first (${Math.round(v * 100)}%).${ship.roster.allHands ? "" : " Call all hands for more hands on it."}`);
 }
 
+// Main viewer magnification — see lens.js. Not at warp: the streaks are
+// drawn for the normal field of view, and the view resets when warp engages.
+const fmtZoom = (z) => `×${+z.toFixed(1)}`;
+// Magnifying onto a target from normal view needs some magnification to be
+// worth doing; an explicit zoom ("magnify 1 on Erebus") still wins.
+const TARGET_ZOOM = 4;
+function setLens(patch) {
+  Object.assign(lens, patch);
+  lens.zoom = clampZoom(lens.zoom);
+  useUI.getState().setLens(lens);
+}
+const clearTarget = () => setLens({ targetId: null, targetName: null });
+// Where a body sits from the viewer: distance, and degrees off the bow.
+function sighting(o) {
+  const p = worldPos(o);
+  const d = [p[0] - sim.pos[0], p[1] - sim.pos[1], p[2] - sim.pos[2]];
+  const dist = Math.hypot(...d) || 1e-9;
+  const f = view.facing;
+  const cos = (d[0] * f[0] + d[1] * f[1] + d[2] * f[2]) / dist;
+  return { dist, arc: (Math.acos(Math.max(-1, Math.min(1, cos))) * 180) / Math.PI };
+}
+// Same lookup `hail` uses, but an exact name beats a partial one, so
+// "Altair 7" isn't taken for "Altair 70".
+function findContact(query) {
+  const q = query.toLowerCase();
+  const near = nearbyObjects(SWEEP_RANGE);
+  return (near.find(({ o }) => o.name.toLowerCase() === q) ?? near.find(({ o }) => o.name.toLowerCase().includes(q)))?.o;
+}
+function lensReport() {
+  const z = lens.zoom === 1 ? "normal magnification" : fmtZoom(lens.zoom);
+  return lens.targetId ? `Main viewer at ${z}, held on ${lens.targetName}.` : `Main viewer at ${z}, looking ahead.`;
+}
+function magnifyOrder(rest) {
+  const o = parseMagnify(rest);
+  if (o.error) { sim.log("deny", `Can't magnify "${o.error}". Try magnify 4, magnify in, magnify out, magnify on <name>, magnify off.`); return; }
+  if (o.reset) {
+    if (lens.zoom === 1 && !lens.targetId) { sim.log("info", "Main viewer already at normal magnification, looking ahead."); return; }
+    setLens({ zoom: 1, targetId: null, targetName: null });
+    sim.log("order", "Magnification off. Viewer ahead.");
+    return;
+  }
+  if (o.ahead) {
+    if (!lens.targetId) { sim.log("info", "Main viewer already looking ahead."); return; }
+    clearTarget();
+    sim.log("order", "Viewer ahead.");
+    return;
+  }
+  if (o.zoom == null && o.step == null && o.target == null) { sim.log("info", lensReport()); return; }
+  if (sim.mode === "warp") { sim.log("deny", "Can't magnify at warp."); return; }
+
+  let target = null, seen = null;
+  if (o.target != null) {
+    target = findContact(o.target);
+    if (!target) { sim.log("deny", `No contact matching "${o.target}" within range.`); return; }
+    seen = sighting(target);
+    if (seen.arc > MAX_ARC) {
+      sim.log("deny", `${target.name} is ${seen.arc.toFixed(0)}° off the bow — outside the viewer's ${MAX_ARC}° arc. Come about for ${target.name} first.`);
+      return;
+    }
+  }
+  const want = o.step ? lens.zoom * o.step : o.zoom ?? (target && lens.zoom === 1 ? TARGET_ZOOM : lens.zoom);
+  if (o.step && clampZoom(want) === lens.zoom) {
+    sim.log("info", lens.zoom === 1 ? "Main viewer already at normal magnification." : `Main viewer already at maximum, ${fmtZoom(MAX_ZOOM)}.`);
+    return;
+  }
+  setLens(target ? { zoom: want, targetId: target.id, targetName: target.name } : { zoom: want });
+  useUI.getState().setStation("conn");
+  const max = want > MAX_ZOOM ? " That's the maximum." : "";
+  if (target) {
+    sim.log("order", `${lens.zoom === 1 ? "Viewer" : `Magnify ${fmtZoom(lens.zoom)}`} on ${target.name} — ${seen.dist.toFixed(0)}u, ${seen.arc.toFixed(0)}° off the bow.${max}`);
+  } else {
+    sim.log("order", lens.zoom === 1 ? `Magnification off.${lens.targetId ? ` Still on ${lens.targetName}.` : ""}` : `Magnify ${fmtZoom(lens.zoom)}.${max}`);
+  }
+}
+// Run with the UI ticker: let go of a target that's gone out of range or
+// swung out of the viewer's arc, and drop to normal view at warp.
+function checkLens() {
+  if (sim.mode === "warp" && (lens.zoom !== 1 || lens.targetId)) {
+    setLens({ zoom: 1, targetId: null, targetName: null });
+    sim.log("info", "Main viewer to normal magnification for warp.");
+    return;
+  }
+  if (!lens.targetId) return;
+  const o = byId[lens.targetId];
+  const seen = o && sighting(o);
+  if (!seen || seen.dist > SWEEP_RANGE) {
+    sim.log("info", `${lens.targetName} out of range. Viewer ahead.`);
+    clearTarget();
+  } else if (seen.arc > MAX_ARC) {
+    sim.log("info", `${lens.targetName} has passed out of the viewer's arc. Viewer ahead.`);
+    clearTarget();
+  }
+}
+
 // Save the mission's state into the career as the page closes — so what
 // happened still happened, even if the tab is shut mid-crisis.
 function saveOnExit() {
@@ -202,6 +297,7 @@ function handleCommand(text) {
     return;
   }
   if ((m = t.match(/^repair\s+(.+)$/))) { repairOrder(m[1]); return; }
+  if ((m = t.match(/^(?:magnify|magnification|zoom|enhance)(?:\s+(.*))?$/))) { magnifyOrder(m[1] ?? ""); return; }
   if ((m = t.match(/^cross[- ]?train\s+(.+?)\s+(?:in|on|for|to)\s+(command|helm|science|comms|engineering|tactical|security|medical|operations)$/))) {
     crossTrainOrder(m[1], m[2]);
     return;
@@ -388,6 +484,7 @@ export default function FlightApp() {
   const listening = useUI((s) => s.listening);
   const alert = useUI((s) => s.alert);
   const shipSnap = useUI((s) => s.ship);
+  const lensSnap = useUI((s) => s.lens);
   const [input, setInput] = useState("");
   const [shake, setShake] = useState(false);
   const seenCues = useRef(null);
@@ -427,6 +524,7 @@ export default function FlightApp() {
       useUI.getState().setAlert({ level: board.level, threats: board.threats, incidents: board.incidents.slice() });
       updateVoice(board);
       updateAlarms(ship, board.level);
+      checkLens();
       useUI.getState().setNearest(nearestBody());
       useUI.getState().setNav(navList());
       // Only publish a new log array (and so only auto-scroll) when an event
@@ -525,7 +623,7 @@ export default function FlightApp() {
               itself keeps advancing regardless, via loop.js. */}
           <Screen />
           {station === "conn" && <ViewscreenFX />}
-          <div className="viewer-tag">{VIEWER_TAG[station]}</div>
+          <div className="viewer-tag">{VIEWER_TAG[station]}{station === "conn" && lensSnap.zoom !== 1 && ` · ${fmtZoom(lensSnap.zoom)}`}{station === "conn" && lensSnap.targetName && ` · ${lensSnap.targetName.toUpperCase()}`}</div>
         </section>
 
         <section className="fconsole">
