@@ -6,11 +6,15 @@
 // own (aGlow, spliced into the standard material): emitters burn bright,
 // tractor nodes pulse, plating just shows its seams, and a destroyed block
 // goes dark and drops out. Cutting beams are a small pool of additive
-// cylinders; the tractor beam is a cone from the cube to the ship.
+// cylinders; the tractor beam is a shaft from a tractor node to the ship.
+// Our own phasers (tactical.js shots) are orange, from the bow to the
+// block they hit, with a flash where they land; a miss streaks past.
 import * as THREE from "three";
 import { CELL, N } from "../universe/cube.js";
 
 const BEAM_SLOTS = 12;
+const PHASER_SLOTS = 6;
+const PHASER_SHOWN = 0.35;   // s — matches tactical.js SHOT_SHOWN
 
 // 128px panel greeble: a base colour map and an emissive map of the seams.
 function panelTextures() {
@@ -116,6 +120,27 @@ export function makeCubeMesh(count) {
   const tractor = new THREE.Mesh(tractorGeo, tractorMat);
   tractor.visible = false; tractor.frustumCulled = false;
 
+  // Our phasers, and the flash where each lands.
+  const phaserGeo = new THREE.CylinderGeometry(0.03, 0.015, 1, 6, 1, true);
+  phaserGeo.translate(0, 0.5, 0);
+  const phasers = Array.from({ length: PHASER_SLOTS }, () => {
+    const m = new THREE.Mesh(phaserGeo, new THREE.MeshBasicMaterial({
+      color: new THREE.Color(1.0, 0.55, 0.15), transparent: true, opacity: 1,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    m.visible = false; m.frustumCulled = false;
+    return m;
+  });
+  const flashGeo = new THREE.SphereGeometry(1, 12, 8);
+  const flashes = Array.from({ length: PHASER_SLOTS }, () => {
+    const m = new THREE.Mesh(flashGeo, new THREE.MeshBasicMaterial({
+      color: new THREE.Color(1.0, 0.75, 0.35), transparent: true, opacity: 1,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    m.visible = false; m.frustumCulled = false;
+    return m;
+  });
+
   const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _p = new THREE.Vector3(), _s = new THREE.Vector3();
   const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
   const _yaw = new THREE.Quaternion(), _Y = new THREE.Vector3(0, 1, 0);
@@ -141,9 +166,10 @@ export function makeCubeMesh(count) {
   };
 
   return {
-    mesh, beams, tractor,
-    // cube: the live Cube; ship: the ship's world position; t: seconds.
-    update(cube, ship, t) {
+    mesh, beams, tractor, phasers, flashes,
+    // cube: the live Cube; ship: the ship's world position; t: seconds;
+    // ours: Tactical's recent shots, timed on `ourT` (tactical.time).
+    update(cube, ship, t, ours = [], ourT = 0) {
       const rel = (p) => [p[0] - ship[0], p[1] - ship[1], p[2] - ship[2]];
       const r = rel(cube.pos);
       _yaw.setFromAxisAngle(_Y, cube.yaw);
@@ -158,6 +184,7 @@ export function makeCubeMesh(count) {
         let k = GLOW[b.role] * (0.25 + 0.75 * b.hp);
         if (b.role === "tractor") k *= cube.tractor ? 1.6 + 0.6 * Math.sin(t * 9) : 0.8 + 0.2 * Math.sin(t * 1.5 + i);
         if (b.role === "emitter") k *= 0.8 + 0.2 * Math.sin(t * 2 + i * 1.7);
+        if (cube.disabled) k *= 0.06 * (1 + Math.sin(t * 0.7 + i * 3.1));   // dead: a few dying flickers
         glow.setX(i, k);
       });
       mesh.instanceMatrix.needsUpdate = true;
@@ -176,6 +203,35 @@ export function makeCubeMesh(count) {
         span(m, _a, _b);
         m.material.opacity = 0.95 * Math.max(0, 1 - age / 0.5);
         m.visible = true;
+      });
+
+      // Our phasers: from the bow, alternating banks, to the block hit — or
+      // past the face for a miss.
+      phasers.forEach((m, i) => {
+        const s = ours[ours.length - 1 - i];
+        const f = flashes[i];
+        if (!s) { m.visible = f.visible = false; return; }
+        const age = ourT - s.t, k = Math.max(0, 1 - age / PHASER_SHOWN);
+        let to;
+        if (s.block) to = rel(cube.blockPos(s.block));
+        else {
+          const n = cube.normal(s.face), c = rel(cube.pos);
+          const j = Math.sin(s.t * 91.7);
+          to = [c[0] + n[0] * 3 + j * 1.5, c[1] + n[1] * 3 + 1.2, c[2] + n[2] * 3 - j * 1.5];
+        }
+        const side = Math.sin(s.t * 37.1) > 0 ? 1 : -1;
+        _b.set(to[0], to[1], to[2]);
+        _a.copy(_b).normalize().multiplyScalar(0.8);
+        _a.y -= 0.35; _a.x += side * 0.25;
+        span(m, _a, _b);
+        m.material.opacity = k;
+        m.visible = true;
+        f.visible = !!s.block;
+        if (s.block) {
+          f.position.set(to[0], to[1], to[2]);
+          f.scale.setScalar(0.05 + 0.25 * (1 - k));
+          f.material.opacity = k;
+        }
       });
 
       // Tractor: from whichever live node faces us, onto the hull.

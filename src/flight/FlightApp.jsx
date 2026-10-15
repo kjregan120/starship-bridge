@@ -8,7 +8,7 @@ import ViewscreenFX from "./ViewscreenFX.jsx";
 import GameOver from "./GameOver.jsx";
 import { useUI } from "./store.js";
 import { stopListening } from "./commsAudio.js";
-import { sim, ship, career, navList, nearestBody, nearbyObjects, startBodyName, byId, view, worldPos } from "./engine.js";
+import { sim, ship, career, navList, nearestBody, nearbyObjects, startBodyName, byId, view, worldPos, collective, tactical } from "./engine.js";
 import { checkpoint, finalizeMission, reassign as reassignInCareer, crossTrain as crossTrainInCareer, findByName } from "../universe/personnel/career.js";
 import { fullName, skillLevel, levelName, skillById, CORE_SKILL, qualifiedDepts } from "../universe/personnel/profile.js";
 import { fmtClock, SHIFT_LABEL } from "../universe/personnel/util.js";
@@ -41,14 +41,15 @@ const STATION_HELP = {
   conn: "CONN — ahead full|half|quarter · reverse full|half|quarter · port|starboard <degrees> · all stop · come about for <name> · warp <1-3> to <name> · warp <1-3> · warp <1-3> route · drop out · magnify <1-10> · magnify in|out · magnify [<1-10>] on <name> to hold the viewer on a contact · magnify ahead · magnify off",
   science: "SCIENCE — ship status. scan · status for a report · withdraw to pull away from whatever is cooking the ship · reactor <0-120> to set the reactor's output limit (over 100 runs hot) · power <shields|engines|sensors|comms|life> <0-150> to change a system's share · power reset · repair <reactor|radiators|impulse|warp|emitters|life|comms|sensors|fore|aft|port|starboard> to put repair crews on it first · repair all · silence alarm · voice on|off · mute / unmute.",
   crew: "CREW — the forty aboard, on three watches (alpha 0800, beta 1600, gamma 0000; a ship hour is a minute). call all hands to bring everyone to their stations (more hands, faster repairs — but they tire) · stand down to go back to watches · all hands to shelter (radiation shelter, stations unmanned) · resume stations · evacuate <fore|aft|port|starboard> · send injured to sickbay · crew report · file <name> to open a personnel file · reassign <name> to <department> (needs Qualified or better in that department's core skill) · reassign <name> back · cross-train <name> in <department> to have them learn it. Click a section on the deck plan to evacuate it; click a name for their file.",
-  tactical: "TACTICAL — 3D chart. Drag to rotate, scroll to zoom, right-drag to pan. Shows any plotted course.",
+  tactical: "TACTICAL — 3D chart. Drag to rotate, scroll to zoom, right-drag to pan. Shows any plotted course. In a fight the Tactical crew pick targets and rotate frequencies themselves; if no order comes in the few seconds after an enemy is in range, they engage. engage (or open fire) · hold fire · target <emitters|tractor|regen|core|auto> · stance <balanced|defensive|aggressive> · power weapons <0-150>.",
   comms: "COMMS — auto-monitors the nearest contact's signal bands. Press LISTEN to hear a sonification of it. sweep for every contact in range · hail <name> to open a channel · tune <radio|microwave|elements|gravimetric|subspace> to filter toward one band, tune off to clear · decode to attempt to pull a message off the open channel (LISTEN first), decode stop to abort."
 };
 
 const SWEEP_RANGE = 1500;
 const POWER_ALIAS = {
   shields: "shields", shield: "shields", engines: "engines", engine: "engines", impulse: "engines", warp: "engines",
-  sensors: "sensors", sensor: "sensors", comms: "comms", comm: "comms", life: "life", lifesupport: "life"
+  sensors: "sensors", sensor: "sensors", comms: "comms", comm: "comms", life: "life", lifesupport: "life",
+  weapons: "weapons", weapon: "weapons", phasers: "weapons"
 };
 
 // A spoken summary of the ship's condition — the Science screen in a few lines.
@@ -277,6 +278,11 @@ function handleCommand(text) {
   }
   if (/^(status|report|damage report)$/.test(t)) { statusReport(); return; }
   if (/^(withdraw|evasive|retreat|get us out(?: of here)?|fall back)$/.test(t)) { withdraw(); return; }
+  // Tactical (tactical.js): optional — the crew fight on their own.
+  if (/^(engage|open fire|fire|fire at will|weapons free)$/.test(t)) { const r = tactical.engage(collective.cube); sim.log(r.ok ? "order" : "deny", r.text); return; }
+  if (/^(hold fire|cease fire|weapons hold|stop firing)$/.test(t)) { const r = tactical.holdFire(collective.cube); sim.log(r.ok ? "order" : "deny", r.text); return; }
+  if ((m = t.match(/^target\s+(\w+)$/))) { const r = tactical.setTarget({ emitter: "emitters", nodes: "regen", tractors: "tractor" }[m[1]] ?? m[1]); sim.log(r.ok ? "order" : "deny", r.text); return; }
+  if ((m = t.match(/^stance\s+(\w+)$/))) { const r = tactical.setStance(m[1]); sim.log(r.ok ? "order" : "deny", r.text); return; }
   if (/^(all hands to (?:radiation )?shelter|shelter|take shelter)$/.test(t)) {
     if (ship.roster.sheltered) { sim.log("info", "Crew already in shelter."); return; }
     ship.roster.shelterAll();
@@ -467,6 +473,7 @@ function handleCommand(text) {
 // everything else is read on the Science screen.
 const stationFor = (t) =>
   t.action === "withdraw" ? "conn" :
+  t.id.startsWith("cube") ? "tactical" :
   t.id === "crew" || t.id === "sheltered" || t.id.startsWith("staff-") || /shelter|evacuate|sickbay|stations|all hands|stand down/.test(t.action ?? "") ? "crew" :
   "science";
 const board = new AlertBoard();

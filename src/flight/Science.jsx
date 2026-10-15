@@ -58,7 +58,7 @@ function Panel({ title, children, accent, grid = false }) {
   );
 }
 
-const POWER_LABEL = { life: "LIFE SUPPORT", shields: "SHIELDS", engines: "ENGINES", sensors: "SENSORS", comms: "COMMS" };
+const POWER_LABEL = { life: "LIFE SUPPORT", shields: "SHIELDS", engines: "ENGINES", weapons: "WEAPONS", sensors: "SENSORS", comms: "COMMS" };
 
 function PowerPanel({ s }) {
   const { power, reactor, settings } = s;
@@ -234,6 +234,12 @@ function Schematic({ s }) {
         <path d="M-8,-150 A8,8 0 0 1 8,-150" className="sci-detail" />
       </g>
 
+      {/* phaser banks — a strip either side of the bow */}
+      <g className={`sci-comp ${lv(h.weapons)}`}>
+        <path d="M-46,-176 Q-24,-196 -8,-200" className="sci-phaser" />
+        <path d="M46,-176 Q24,-196 8,-200" className="sci-phaser" />
+      </g>
+
       {/* sensor dome */}
       <g className={`sci-comp ${lv(h.sensors)}`}>
         <circle cx="0" cy="-218" r="10" />
@@ -251,6 +257,7 @@ function Schematic({ s }) {
       <Callout x={-46} y={8} tx={-170} side="left" label="SHIELD EMITTERS" value={pct(h.emitters)} lv={lv(h.emitters)} />
       <Callout x={-156} y={-60} tx={-176} side="left" label="WARP COILS" value={s.warpMax ? `${pct(h.warp)} · max ${s.warpMax}` : `${pct(h.warp)} · OFF-LINE`} lv={lv(h.warp)} />
       <Callout x={-108} y={200} tx={-170} side="left" label="RADIATORS" value={pct(h.radiators)} lv={lv(h.radiators)} />
+      <Callout x={46} y={-176} tx={170} side="right" label="WEAPONS" value={h.weapons < 0.15 ? `${pct(h.weapons)} · OFF-LINE` : pct(h.weapons)} lv={lv(h.weapons)} />
       <Callout x={46} y={8} tx={170} side="right" label="LIFE SUPPORT" value={pct(h.life)} lv={lv(h.life)} />
       <Callout x={22} y={160} tx={170} side="right" label="REACTOR" value={s.reactor.scrammed ? "SCRAM" : pct(h.reactor)} lv={s.reactor.scrammed ? "crit" : lv(h.reactor)} />
       <Callout x={28} y={236} tx={170} side="right" label="IMPULSE" value={pct(h.impulse)} lv={lv(h.impulse)} />

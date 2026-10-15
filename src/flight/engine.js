@@ -6,6 +6,7 @@ import { positionAt, magnitude } from "../universe/physics.js";
 import { ShipSystems, fluxAt } from "../universe/ship.js";
 import { Collective } from "../universe/collective.js";
 import { Cube } from "../universe/cube.js";
+import { Tactical } from "../universe/tactical.js";
 import { newCareer, startMission } from "../universe/personnel/career.js";
 import { dateOf, fmtClock, SHIFT_LABEL } from "../universe/personnel/util.js";
 import { loadCareer, saveCareer } from "./careerStore.js";
@@ -68,12 +69,14 @@ export { universe };
 export const collective = new Collective({
   stars, home: homeStar, posOf: (o) => positionAt(o, byId, sim.t),
 });
+// The Tactical department fighting it (tactical.js), stepped alongside.
+export const tactical = new Tactical();
 
 // Dev builds only: a handle for poking at the live sim from the console,
 // e.g. __bridge.summonCube() to bring a cube in 12u ahead.
 if (import.meta.env?.DEV && typeof window !== "undefined") {
   window.__bridge = {
-    sim, ship, collective,
+    sim, ship, collective, tactical,
     summonCube(range = 12) {
       const f = sim.facing, p = sim.pos;
       collective.cube = new Cube({ id: `cube-dev-${Date.now()}`, pos: [p[0] + f[0] * range, p[1] + f[1] * range + 1, p[2] + f[2] * range], seed: 5 });

@@ -32,11 +32,13 @@ import { Wear } from "./faults.js";
 // ---- power ------------------------------------------------------------------
 // Power is in units where the reactor's rated output is 100. Demand at a
 // 100% setting; engines depend on what the helm is doing.
-const DEMAND = { life: 15, shields: 25, sensors: 10, comms: 8 };
+const DEMAND = { life: 15, shields: 25, weapons: 20, sensors: 10, comms: 8 };
 const IMPULSE_DEMAND = 30;          // at full throttle
 const WARP_DEMAND = (f) => 20 + 8 * f;
 // Who gets fed first when the reactor can't cover everything.
-export const PRIORITY = ["life", "shields", "engines", "sensors", "comms"];
+// Weapons come after the engines: a ship that can still run beats one that
+// can still shoot. Their demand is however hard Tactical is firing (env.weaponsLoad).
+export const PRIORITY = ["life", "shields", "engines", "weapons", "sensors", "comms"];
 export const POWER_SYSTEMS = PRIORITY;
 const SETTING_MAX = 1.5;
 
@@ -47,6 +49,7 @@ const EMERGENCY_THRUST = 10;        // of that, held for the engines — enough 
 const SCRAM_RESTART = 30;           // seconds before a restart is attempted
 const NO_FUEL_POWER = 0.25;         // what the reactor manages on an empty tank
 const TRACTOR_DRAG = 0.15;          // impulse left while held in a tractor beam
+export const WEAPONS_OFFLINE = 0.15; // weapons health below this and they can't fire
 
 // ---- fuel ---------------------------------------------------------------
 const FUEL_BURN = 1 / 2400;         // per second at 100 units of output (40 min)
@@ -77,7 +80,7 @@ export const HULL_SECTIONS = ["fore", "aft", "port", "starboard"];
 // Which components sit in which part of the hull — a hit on a side can
 // knock out what's there. Matches the schematic in Science.jsx.
 const SECTION_COMPONENTS = {
-  fore: ["sensors", "comms"],
+  fore: ["sensors", "comms", "weapons"],
   aft: ["reactor", "impulse", "radiators"],
   port: ["warp", "emitters"],
   starboard: ["warp", "life"],
@@ -95,6 +98,7 @@ export const MAINTENANCE = {
   life:      { dept: "operations",  skill: "life-support",    label: "Life support" },
   comms:     { dept: "comms",       skill: "signals",         label: "Comms array" },
   sensors:   { dept: "science",     skill: "sensor-analysis", label: "Sensors" },
+  weapons:   { dept: "tactical",    skill: "weapons",         label: "Weapons" },
 };
 const DAMAGE_CONTROL = ["security", "operations"];
 const REPAIR_RATE = 0.0006;         // component health per second per unit of work
@@ -121,7 +125,7 @@ export class ShipSystems {
     // Component health — 0 is destroyed. The crew repair it (_repairStep).
     this.health = {
       reactor: 1, radiators: 1, emitters: 1, life: 1,
-      impulse: 1, warp: 1, comms: 1, sensors: 1,
+      impulse: 1, warp: 1, comms: 1, sensors: 1, weapons: 1,
     };
     this.hull = { fore: 1, aft: 1, port: 1, starboard: 1 };
     // Wear and tear, and the faults it brings (faults.js) — off unless asked
@@ -129,7 +133,7 @@ export class ShipSystems {
     this.wear = opts.faults ? new Wear(Object.keys(this.health), this.random) : null;
 
     this.reactor = { setting: 1, output: 60, capacity: 100, scrammed: false, restartIn: 0 };
-    this.settings = { life: 1, shields: 1, engines: 1, sensors: 1, comms: 1 };
+    this.settings = { life: 1, shields: 1, engines: 1, weapons: 1, sensors: 1, comms: 1 };
     this.power = { demand: {}, alloc: {}, sat: {}, total: 0 };
 
     this.fuel = 0.85;
@@ -225,6 +229,12 @@ export class ShipSystems {
   }
 
   // How well comms and sensors are working, all things considered.
+  // What the weapons can put out, 0..1.5: their health, the power they're
+  // getting, and the `power weapons` setting. Nothing below WEAPONS_OFFLINE.
+  weaponsFactor() {
+    if (this.health.weapons < WEAPONS_OFFLINE) return 0;
+    return this.health.weapons * Math.min(1, this.power.sat.weapons ?? 1) * Math.min(SETTING_MAX, this.settings.weapons);
+  }
   commsQuality() { return this.health.comms * (this.power.sat.comms ?? 1) * (1 - this.interference) * this.roster.factor("comms"); }
   sensorQuality() { return this.health.sensors * (this.power.sat.sensors ?? 1) * (1 - this.noise) * this.roster.factor("science"); }
 
@@ -284,6 +294,7 @@ export class ShipSystems {
     const demand = {
       life: DEMAND.life * s.life,
       shields: DEMAND.shields * s.shields,
+      weapons: DEMAND.weapons * s.weapons * (env.weaponsLoad ?? 0),
       engines: engineBase * Math.min(1, s.engines),
       sensors: DEMAND.sensors * s.sensors,
       comms: DEMAND.comms * s.comms,
@@ -443,6 +454,7 @@ export class ShipSystems {
       life: 0.8,
       comms: 0.4 + 0.4 * this.settings.comms,
       sensors: 0.4 + 0.4 * this.settings.sensors,
+      weapons: 0.2 + 0.8 * (env.weaponsLoad ?? 0),
     };
     const upkeep = (c) => Math.min(1, this.roster.staffing(MAINTENANCE[c].dept));
     for (const { c, fault } of this.wear.step(dt, this.time, this.health, use, upkeep)) {

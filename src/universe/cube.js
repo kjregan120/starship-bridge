@@ -42,8 +42,17 @@ const SHOT_EVERY = 13;               // s, per emitter, ± a few
 const BEARS = 0.25;                  // a face bears on you when its normal is this close to you
 const BREAK_FREE_AFTER = 6;          // s of it to tear free
 const TRACTOR_RECHARGE = 25;         // s before it can lock on again
-const REGEN = 0.01;                  // hp/s a regen node restores to each damaged neighbour
-const REGEN_REACH = 2;               // cells
+const REGEN = 0.003;                 // hp/s a regen node restores to each damaged neighbour
+const REGEN_REACH = 1;               // cells
+
+// Adaptation: the cube learns whichever weapon frequency is hurting it.
+export const BANDS = 8;              // weapon frequency bands
+const ADAPT = 0.3;                   // resistance gained per unit of damage taken on a band
+const ADAPT_MAX = 0.9;
+const FORGET = 0.012;                // resistance lost per second on every band
+export const ADAPTED_AT = 0.45;      // past this, it has noticeably adapted
+const BREACHED_AT = 0.4;             // face integrity below this exposes the core
+const EXPOSED_AT = 0.65;             // ...or the whole shell's, through any face
 
 export const HAIL = "We are the Collective. Your vessel has been scanned. Cut your engines and lower your shields. You will be joined to us. Resistance is futile.";
 
@@ -108,7 +117,9 @@ export class Cube {
     this._strain = 0;            // seconds the ship has been straining against it
     this.time = 0;
     this.shots = [];             // recent cutting-beam shots, for the renderer: { block, t }
-    for (const b of this.blocks) if (b.role === "emitter") b.next = 4 + this.random() * SHOT_EVERY * 1.5;
+    this.resist = new Array(BANDS).fill(0);   // per weapon band, 0..ADAPT_MAX
+    this._disabledSaid = false;
+    for (const b of this.blocks) if (b.role === "emitter") b.next = 2 + this.random() * SHOT_EVERY;
   }
 
   get disabled() { return this.blocks.every((b) => b.role !== "core" || b.hp <= 0); }
@@ -152,7 +163,17 @@ export class Cube {
   step(dt, ship) {
     this.time += dt;
     const ev = [];
-    if (this.mode === "lost" || this.disabled) return ev;
+    if (this.mode === "lost") return ev;
+    if (this.disabled) {
+      if (!this._disabledSaid) {
+        this._disabledSaid = true;
+        this.shots = [];
+        if (this.tractor) { this.tractor = false; ev.push({ type: "tractor", on: false, why: "disabled" }); }
+        ev.push({ type: "disabled" });
+      }
+      return ev;
+    }
+    for (let i = 0; i < BANDS; i++) this.resist[i] = Math.max(0, this.resist[i] - FORGET * dt);
     const toShip = sub(ship.pos, this.pos);
     const d = len(toShip);
 
@@ -249,23 +270,64 @@ export class Cube {
     }
   }
 
-  // Damage to a face (phase 2's weapons): plating takes most of it, the rest
-  // falls on whatever else is on that face; once breached, some reaches the
-  // core. Returns the blocks hit.
-  damage(face, energy) {
+  // The whole shell's integrity (0..1).
+  structure() {
+    const shell = this.blocks.filter((b) => b.role !== "core");
+    return shell.reduce((a, b) => a + b.hp, 0) / shell.length;
+  }
+  // The core can be reached through this face: it's broken open, or so much
+  // of the cube is shot away that turning a fresh face to us doesn't hide it.
+  breached(face) { return this.integrity(face) < BREACHED_AT || this.structure() < EXPOSED_AT; }
+
+  // Our weapons hit a face. `band`: the weapon frequency — damage is cut by
+  // how far the cube has adapted to it, and it adapts further. `role`: what
+  // the gunners are aiming at, which `aim` (0..1) of the hits find; the rest
+  // land anywhere on the face. The core can only be hit through a breached
+  // face — aimed at, or by a share of stray hits once it's open.
+  // Returns { blocks, dealt, adapted } — `adapted` true the hit that takes
+  // the band past ADAPTED_AT.
+  damage(face, energy, { band = null, role = null, aim = 0 } = {}) {
     const on = this.blocks.filter((b) => b.hp > 0 && b.faces.includes(face));
-    const hit = [];
-    if (!on.length) return hit;
-    const breached = this.integrity(face) < 0.4;
+    const out = { blocks: [], dealt: 0, adapted: false };
+    if (!on.length || energy <= 0) return out;
+    let e = energy;
+    if (band != null) {
+      const before = this.resist[band];
+      e *= 1 - before;
+      this.resist[band] = Math.min(ADAPT_MAX, before + ADAPT * energy);
+      out.adapted = before < ADAPTED_AT && this.resist[band] >= ADAPTED_AT;
+    }
+    const open = this.breached(face);
     const core = this.blocks.filter((b) => b.role === "core" && b.hp > 0);
+    const aimed = role === "core" ? (open ? core : []) : on.filter((b) => b.role === role);
     const n = Math.max(1, Math.round(energy * 6));
     for (let i = 0; i < n; i++) {
-      const pool = breached && core.length && this.random() < 0.35 ? core : on;
+      const pool = aimed.some((b) => b.hp > 0) && this.random() < aim ? aimed.filter((b) => b.hp > 0)
+        : open && core.some((b) => b.hp > 0) && this.random() < 0.35 ? core.filter((b) => b.hp > 0)
+        : this._spot(face, on, aim);
+      if (!pool.length) break;
       const b = pool[Math.floor(this.random() * pool.length)];
-      b.hp = Math.max(0, b.hp - energy / n * 2.5);
-      hit.push(b);
+      const dmg = Math.min(b.hp, (e / n) * 2.5);
+      b.hp -= dmg;
+      out.dealt += dmg;
+      out.blocks.push(b);
     }
-    return hit;
+    return out;
+  }
+
+  // Gunners working a face's plating keep at one spot until it gives, so a
+  // breach opens instead of the damage spreading thin for the regen nodes to
+  // undo: the blocks around the last one hit, with `aim` of the time.
+  _spot(face, on, aim) {
+    const live = on.filter((b) => b.hp > 0);
+    const f = this._focus?.[face];
+    if (f && this.random() < aim) {
+      const near = live.filter((b) => Math.max(...b.cell.map((c, i) => Math.abs(c - f.cell[i]))) <= 1);
+      if (near.length) return near;
+    }
+    const b = live[Math.floor(this.random() * live.length)];
+    (this._focus ??= {})[face] = b;
+    return live;
   }
 
   snapshot() {

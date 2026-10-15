@@ -537,3 +537,6 @@
 .sci-repair-fault.spreading { color: var(--red, #ff5544); animation: sci-fault-pulse 1.2s ease-in-out infinite; }
 @keyframes sci-fault-pulse { 50% { opacity: 0.55; } }
 .pf-gain { color: #6bffc4; font-size: 0.85em; }
+
+/* ---- weapons ------------------------------------------------------------------ */
+.sci-comp .sci-phaser { fill: none !important; stroke-width: 5; stroke-linecap: round; }

@@ -38,7 +38,7 @@ import { SERVICE_YEARS, ENTRY_AGE } from "./data/complement.js";
 import { PLACES, SCHOOLS, FIELDS, SHIPS, OCCUPATIONS, INCIDENTS, ALLERGIES, CONDITIONS, BLOOD_TYPES } from "./data/names.js";
 import { YEAR, dateOf, yearOf, yearsBetween } from "./util.js";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 export const skillById = Object.fromEntries(SKILLS.map((s) => [s.id, s]));
 export const dutyById = Object.fromEntries(DUTIES.map((d) => [d.id, d]));
 export const activityById = Object.fromEntries(ACTIVITIES.map((a) => [a.id, a]));

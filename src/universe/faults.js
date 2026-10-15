@@ -47,6 +47,11 @@ export const FAULTS = {
     { name: "transceiver failed", hit: [0.2, 0.4], spread: 0, work: 0 },
     { name: "array power coupling arcing", hit: [0.1, 0.2], spread: 0.004, work: 25 },
   ],
+  weapons: [
+    { name: "phaser coupling burned out", hit: [0.15, 0.3], spread: 0, work: 0 },
+    { name: "targeting array misaligned", hit: [0.2, 0.35], spread: 0, work: 0 },
+    { name: "phaser capacitor bank arcing", hit: [0.1, 0.2], spread: 0.004, work: 30 },
+  ],
   sensors: [
     { name: "sensor pallet misaligned", hit: [0.2, 0.4], spread: 0, work: 0 },
     { name: "processor core overheating", hit: [0.1, 0.2], spread: 0.004, work: 25 },

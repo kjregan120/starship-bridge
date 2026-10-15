@@ -4,8 +4,34 @@ An enemy ship: a cube of ~150 blocks that hunts, fires, holds you with a
 tractor beam, adapts to your weapons, hails, and boards. The captain doesn't
 fight it shot by shot; Tactical does, the way repair crews handle damage.
 
-Status: **phase 1 built** (2026-10-14) on top of the ejecta hits (`universe/cme.js`).
-Phases 2–3 are design.
+Status: **phases 1 and 2 built** (2026-10-14) on top of the ejecta hits
+(`universe/cme.js`). Phase 3 (boarding, assimilation) is design.
+
+### As built (phase 2) — where it differs from below
+
+- `universe/tactical.js` holds the state machine and the crew's decisions.
+  Gun crew effectiveness = `Roster.workers(["tactical"], "weapons")` ÷ 3
+  (capped 1.15); a normal watch is about 0.3–0.6, all hands ~1.1.
+- Auto targeting: the tractor array if it holds us → the core once
+  reachable → emitters on the faces that bear → regen nodes → plating
+  (a weakest bearing face, worked at one spot so a breach opens).
+- The core is reachable through a breached face (< 40%) **or** through any
+  face once the whole shell is below 65% — otherwise the cube just turns a
+  fresh face to us forever.
+- Adaptation: +0.3 resistance per unit of damage on a band, −0.012/s on
+  every band, cap 0.9; "adapted" at 0.45. Crew notice after 6 s ÷
+  effectiveness and pick the least-adapted band (a green crew sometimes
+  grabs a random one).
+- Regen nerfed to 0.003 hp/s, adjacent blocks only.
+- Weapons draw 20 × `power weapons` × load; load is 0 idle, 0.1 holding,
+  and while firing by stance (balanced eases to 0.5 below 40% shields).
+  Priority: life, shields, engines, **weapons**, sensors, comms.
+- The duty `weapons-watch` wasn't added — the Tactical posts keep their
+  duties; the skill is enough. Save schema 3 gives existing tactical crew
+  weapons xp equal to their tactical-analysis xp.
+- Balance (stationary ship, fresh cube, 4 seeds): no gun crew always
+  loses; the watch wins about half, in ~6.5–7 min with heavy hull damage;
+  all hands always wins, in ~3.5–4.5 min.
 
 ### As built (phase 1) — where it differs from below
 

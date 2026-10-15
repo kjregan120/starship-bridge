@@ -2,7 +2,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Stars } from "@react-three/drei";
 import { useRef, useMemo, useState, useEffect } from "react";
 import * as THREE from "three";
-import { sim, view, collective, galaxyPoints, nearestStar, starsWithin, blackholesWithin, beaconsWithin, systemBodies, worldPos } from "./engine.js";
+import { sim, view, collective, tactical, galaxyPoints, nearestStar, starsWithin, blackholesWithin, beaconsWithin, systemBodies, worldPos } from "./engine.js";
 import { useUI } from "./store.js";
 import { makeStarMaterials, CORONA_EXTENT } from "./starShader.js";
 import { makeFlareLoops } from "./flareLoops.js";
@@ -346,15 +346,18 @@ function CubeBody() {
     parts.mesh.geometry.dispose(); parts.mesh.material.dispose();
     parts.beams.forEach((b) => b.material.dispose());
     parts.tractor.material.dispose();
+    [...parts.phasers, ...parts.flashes].forEach((b) => b.material.dispose());
   }, [parts]);
   useFrame((state) => {
-    if (collective.cube === cube) parts.update(cube, sim.pos, state.clock.elapsedTime);
+    if (collective.cube === cube) parts.update(cube, sim.pos, state.clock.elapsedTime, tactical.shots, tactical.time);
   });
   return (
     <>
       <primitive object={parts.mesh} />
       {parts.beams.map((b, i) => <primitive key={i} object={b} />)}
       <primitive object={parts.tractor} />
+      {parts.phasers.map((b, i) => <primitive key={`p${i}`} object={b} />)}
+      {parts.flashes.map((b, i) => <primitive key={`f${i}`} object={b} />)}
     </>
   );
 }

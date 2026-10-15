@@ -13,6 +13,8 @@ import { parseMagnify, clampZoom, MAX_ZOOM } from "../flight/lens.js";
 import { cmeStep, cmeEta, cmeEnergy, cmeEffects, frontReach } from "./cme.js";
 import { Cube, mulberry32, HOLD, DETECT, WEAPON_RANGE, TRACTOR_RANGE, LOSE } from "./cube.js";
 import { Collective, collectiveSystems, HOME_SPACE, ROAM_COOLDOWN } from "./collective.js";
+import { Tactical, HOLD_WINDOW } from "./tactical.js";
+import { MAINTENANCE } from "./ship.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const universe = JSON.parse(readFileSync(join(here, "universe.json"), "utf8"));
@@ -396,7 +398,17 @@ console.log("\n11. Watches, learning by doing, and repairs");
   for (const p of Object.values(old.profiles)) { p.schemaVersion = 1; delete p.post.shift; delete p.post.crossTrain; }
   migrateCareer(old);
   check(`a pre-watch save migrates: everyone gets their post's watch`, old.hour === 8 &&
-    Object.values(old.profiles).every((p) => ["alpha", "beta", "gamma"].includes(p.post.shift) && p.schemaVersion === 2));
+    Object.values(old.profiles).every((p) => ["alpha", "beta", "gamma"].includes(p.post.shift) && p.schemaVersion === 3));
+
+  // Saves from before the ship had weapons: tactical crew get trained on them.
+  const preWeapons = JSON.parse(JSON.stringify(newCareer(5)));
+  for (const p of Object.values(preWeapons.profiles)) { p.schemaVersion = 2; delete p.skills.weapons; }
+  migrateCareer(preWeapons);
+  const tac = Object.values(preWeapons.profiles).filter((p) => p.post.dept === "tactical");
+  check(`a pre-weapons save migrates: tactical crew can use the weapons, nobody else gains them`,
+    tac.length > 0 && tac.every((p) => skillLevel(p, "weapons") >= 1) &&
+    Object.values(preWeapons.profiles).filter((p) => p.post.dept !== "tactical").every((p) => !p.skills.weapons),
+    tac.map((p) => skillLevel(p, "weapons")).join(","));
 }
 
 console.log("\n12. Hand-placed bodies");
@@ -608,7 +620,7 @@ console.log("\n16. A Collective cube");
   const regen = cube();
   const near = regen.blocks.find((b) => b.role === "plate" && regen.blocks.some((r) => r.role === "regen" && Math.max(...r.cell.map((x, i) => Math.abs(x - b.cell[i]))) <= 1));
   near.hp = 0.5;
-  run(regen, [DETECT + 10, 0, 0], 10);
+  run(regen, [DETECT + 10, 0, 0], 30);
   check("a regen node regrows damaged blocks near it", near.hp > 0.55, near.hp.toFixed(2));
   const far = cube({ pos: [0, 0, 0], post: null });
   const lostEv = run(far, [LOSE + 5, 0, 0], 1);
@@ -659,6 +671,130 @@ console.log("\n16. A Collective cube");
   a.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } });
   const tt = assessThreats(a).find((x) => x.id === "tractor");
   check("held: the tractor alert says how to break free", tt && tt.action === "reactor 120", tt && tt.action);
+}
+
+console.log("\n17. Fighting back: weapons and the Tactical crew");
+{
+  // A stationary ship against a fresh cube 5u off its stern. `gunners`:
+  // "watch" (as it comes), "all" (all hands), or "none" (Tactical kept off
+  // their stations). `each(t, ship, cube, tac)` runs every tick, for orders.
+  const fight = ({ gunners = "watch", secs = 60, seed = 11, each = null, cube = null } = {}) => {
+    const ship = new ShipSystems({ seed, random: mulberry32(seed) });
+    if (gunners === "all") ship.roster.callAllHands();
+    const c = cube ?? new Cube({ pos: [0, 1.2, -5], seed: 3, random: mulberry32(seed + 1) });
+    const tac = new Tactical({ random: mulberry32(seed + 2) });
+    const pos = [0, 0, 0], facing = [0, 0, 1], said = [], states = [];
+    let disabledAt = null, t = 0;
+    for (; t < secs && disabledAt == null && !ship.crewLost; t += 0.1) {
+      for (const e of c.step(0.1, { pos, facing, mode: "impulse" })) {
+        if (e.type === "fire") ship.hit({ energy: e.energy, from: e.from, facing });
+        if (e.type === "tractor") ship.tractored = e.on;
+        if (e.type === "disabled") disabledAt = t;
+      }
+      if (gunners === "none") for (const m of ship.roster.crew) if (m.dept === "tactical") m.location = "quarters";
+      each?.(t, ship, c, tac);
+      for (const e of tac.step(0.1, { cube: c, ship, shipPos: pos })) said.push(e.text);
+      states.push(tac.state);
+      ship.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 }, weaponsLoad: tac.load });
+    }
+    const hp = c.blocks.reduce((a, b) => a + b.hp, 0) / c.blocks.length;
+    return { ship, cube: c, tac, said, states, disabledAt, hp, t };
+  };
+
+  // The hold window.
+  const quiet = fight({ secs: HOLD_WINDOW - 1 });
+  check("a cube in range: Tactical report ready and hold for orders", quiet.tac.state === "hold" &&
+    quiet.said.some((s) => /awaiting your orders/.test(s)) && quiet.hp === 1);
+  const free = fight({ secs: 30 });
+  check(`no order in ${HOLD_WINDOW} s: they engage on their own, and hit it`, free.said.some((s) => /no orders\. Engaging/i.test(s)) &&
+    free.tac.state === "engaged" && free.hp < 1, `cube at ${(free.hp * 100).toFixed(0)}%`);
+  const held = fight({ secs: 30, each: (t, s, c, tac) => { if (Math.abs(t - 2) < 0.05) tac.holdFire(c); } });
+  check("`hold fire` during the window: they hold, and don't fire", held.tac.state === "holding" && held.hp === 1);
+  const resumed = fight({ secs: 30, each: (t, s, c, tac) => { if (Math.abs(t - 2) < 0.05) tac.holdFire(c); if (Math.abs(t - 10) < 0.05) tac.engage(c); } });
+  check("...and `engage` opens fire", resumed.tac.state === "engaged" && resumed.hp < 1);
+  const early = fight({ secs: 3, each: (t, s, c, tac) => { if (t < 0.05) tac.engage(c); } });
+  check("`engage` skips the window", early.tac.state === "engaged" && !early.states.includes("hold"));
+  // Once per encounter: out of range and back, no second window; a new cube, a new one.
+  const tac = new Tactical({ random: mulberry32(5) });
+  const sh = new ShipSystems({ seed: 11 });
+  const c1 = new Cube({ pos: [0, 0, -5], seed: 3, random: mulberry32(6) });
+  const run = (c, at, secs) => { const st = []; for (let t = 0; t < secs; t += 0.1) { tac.step(0.1, { cube: c, ship: sh, shipPos: at }); st.push(tac.state); } return st; };
+  run(c1, [0, 0, 0], HOLD_WINDOW + 1);
+  tac.holdFire(c1); tac.engage(c1);
+  run(c1, [0, 0, 100], 2);
+  const back = run(c1, [0, 0, 0], 2);
+  check("the hold window comes once per encounter", !back.includes("hold") && back.at(-1) === "engaged");
+  const c2 = new Cube({ pos: [0, 0, -5], seed: 4, random: mulberry32(7) });
+  check("...and again for the next cube", run(c2, [0, 0, 0], 1).includes("hold"));
+
+  // Who's at the guns.
+  const none = fight({ gunners: "none", secs: 120 });
+  const all = fight({ gunners: "all", secs: 120 });
+  check("with no Tactical crew at their stations the guns do almost nothing", none.hp > 0.95, `cube at ${(none.hp * 100).toFixed(0)}%`);
+  check("all hands at the guns do far more", 1 - all.hp > 4 * (1 - none.hp), `${((1 - all.hp) * 100).toFixed(0)}% vs ${((1 - none.hp) * 100).toFixed(0)}% shot away`);
+  const win = fight({ gunners: "all", secs: 360 });
+  check("all hands, standing their ground, disable a fresh cube", win.disabledAt != null && !win.ship.crewLost,
+    `in ${win.disabledAt?.toFixed(0)} s, ${win.ship.roster.alive().length} crew alive`);
+  check("...and the gun crew got better at it", win.ship.roster.crew.filter((m) => m.dept === "tactical").some((m) => (m.xp.weapons ?? 0) > 0));
+  check("a disabled cube stands Tactical down", (() => { win.tac.step(0.1, { cube: win.cube, ship: win.ship, shipPos: [0, 0, 0] }); return win.tac.state === "idle"; })());
+  const doomed = fight({ gunners: "none", secs: 600 });
+  check("with nobody at the guns, standing and fighting is fatal", doomed.ship.crewLost && doomed.disabledAt == null);
+
+  // Adaptation and rotation.
+  const stuck = fight({ gunners: "all", secs: 90, each: (t, s, c, tac) => { tac._nextBand = () => tac.band; } });
+  check("the cube adapts to a frequency it's hit with", stuck.cube.resist[0] > 0.6, stuck.cube.resist[0].toFixed(2));
+  check("...the crew notice, and rotate", all.said.some((s) => /rotating to/.test(s)) && all.tac.band !== 0);
+  check("rotating keeps the phasers biting", 1 - all.hp > 1.5 * (1 - fight({ gunners: "all", secs: 120, each: (t, s, c, tac) => { tac._nextBand = () => tac.band; } }).hp));
+
+  // Targeting.
+  check("by default they go for the emitters cutting at us first", (() => {
+    const f = fight({ gunners: "all", secs: 40 });
+    return f.cube.blocks.filter((b) => b.role === "emitter").some((b) => b.hp <= 0);
+  })());
+  const tr = fight({ gunners: "all", secs: 40, each: (t, s, c, tac) => { if (t < 0.05) tac.setTarget("tractor"); } });
+  check("`target tractor` puts the fire on the tractor array", tr.tac.aimingAt === "tractor" || tr.cube.blocks.some((b) => b.role === "tractor" && b.hp < 1));
+  check("bad orders are refused", !new Tactical().setTarget("bridge").ok && !new Tactical().setStance("angry").ok);
+
+  // The weapons as a ship system.
+  check("weapons are maintained by Tactical, with the weapons skill", MAINTENANCE.weapons?.dept === "tactical" && MAINTENANCE.weapons.skill === "weapons");
+  const wpn = new ShipSystems({ seed: 7 });
+  wpn.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 }, weaponsLoad: 0 });
+  const idleDraw = wpn.power.demand.weapons;
+  wpn.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 }, weaponsLoad: 1 });
+  check("the weapons draw power only when they're firing", idleDraw === 0 && wpn.power.demand.weapons > 15, `${idleDraw} → ${wpn.power.demand.weapons}`);
+  wpn.health.weapons = 0.1;
+  check("below 15% health the weapons are off-line", wpn.weaponsFactor() === 0);
+  const unpowered = fight({ gunners: "all", secs: 30, each: (t, s) => s.setPower("weapons", 0) });
+  check("with no power to the weapons there's no fire", unpowered.hp === 1 && unpowered.said.some((s) => /no power/.test(s)));
+  let fore = 0;
+  for (let i = 0; i < 30; i++) {
+    const s = new ShipSystems({ seed: 7 });
+    s.shields = 0;
+    s.hit({ energy: 0.8, from: [0, 0, 1], facing: [0, 0, 1] });
+    if (s.health.weapons < 1) fore++;
+  }
+  check("a hit on the bow can damage the weapons", fore > 0, `${fore}/30`);
+
+  // A held system's guard, once disabled, doesn't come back this mission.
+  const posOf = (o) => positionAt(o, byId, 0);
+  const stars = objects.filter((o) => o.type === "star");
+  const col = new Collective({ stars, home: stars[0], posOf, random: mulberry32(4) });
+  const sp = posOf(col.held[0]);
+  const near = [sp[0] + 100, sp[1], sp[2]];
+  col.step(0.1, { pos: near, mode: "impulse" });
+  for (const b of col.cube.blocks) if (b.role === "core") b.hp = 0;
+  const ev = col.step(0.1, { pos: near, mode: "impulse" });
+  for (let t = 0; t < 120; t += 1) col.step(1, { pos: near, mode: "impulse" });
+  check("a disabled guard drifts dark a while, then is gone for good", ev.some((e) => e.type === "disabled") && col.cube === null && col.defeated.size === 1);
+
+  // The alerts.
+  const al = new ShipSystems({ seed: 7 });
+  al.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } });
+  al.incoming = [{ kind: "cube", name: "Collective cube", dist: 6, eta: null, weapons: { state: "hold", holdLeft: 3.2 } }];
+  const h = assessThreats(al).find((x) => x.id === "cube-hold");
+  check("the hold window is an alert with its countdown and the order to hold", h && h.eta === 3.2 && h.action === "hold fire", h && h.title);
+  al.incoming[0].weapons = { state: "holding" };
+  check("holding: the alert offers to engage", assessThreats(al).find((x) => x.id === "cube")?.action === "engage");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

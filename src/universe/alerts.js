@@ -170,12 +170,28 @@ export function assessThreats(ship) {
         say: `We're caught in their tractor beam. ${overdriven ? "Recommend full impulse to break free." : "Recommend overdriving the reactor and full impulse to break free."}`,
       });
     }
+    // Tactical (tactical.js): the hold window, and what the guns are doing.
+    const w = cube.weapons;
+    if (w?.state === "hold") {
+      add({
+        id: "cube-hold", level: "red", sev: 89, title: `Weapons ready — engaging in ${Math.ceil(w.holdLeft)} s`,
+        detail: "Tactical will open fire unless ordered otherwise", eta: w.holdLeft, action: "hold fire",
+        say: "Weapons ready. Tactical will engage unless ordered otherwise.",
+      });
+    }
+    const AIM = { emitter: "emitters", tractor: "tractor array", regen: "regen nodes", core: "core", null: "hull" };
+    const guns = !w || w.state === "idle" ? null
+      : w.offline ? "Weapons off-line"
+      : w.state === "holding" ? "Weapons holding"
+      : w.state === "hold" ? null
+      : !w.inRange ? "Weapons engaged — out of range"
+      : `Firing on ${AIM[w.aimingAt]} · freq ${w.band + 1} at ${Math.round(w.effect * 100)}% · gun crew ${Math.round(Math.min(1, w.crew) * 100)}%`;
     const inRange = cube.eta == null;
     add({
       id: "cube", level: "red", sev: inRange ? 88 : 80,
       title: `${cube.name} — ${Math.round(cube.dist)}u${inRange ? "" : ", closing"}`,
-      detail: inRange ? "In weapons range" : "Closing to weapons range",
-      eta: cube.eta, action: ship.tractored ? null : ship.warpInhibit ? "ahead full" : "warp 3",
+      detail: guns ?? (inRange ? "In weapons range" : "Closing to weapons range"),
+      eta: cube.eta, action: w?.state === "holding" ? "engage" : ship.tractored ? null : ship.warpInhibit ? "ahead full" : "warp 3",
       say: inRange
         ? "The cube is in weapons range."
         : `Collective cube closing on us. It will be in weapons range${sayEta(cube.eta)}. Recommend we go to warp.`,
@@ -341,7 +357,7 @@ export function assessThreats(ship) {
 
 const COMPONENT_NAME = {
   reactor: "reactor", radiators: "radiators", emitters: "shield emitters", life: "life support",
-  impulse: "impulse engines", warp: "warp coils", comms: "comms array", sensors: "sensors",
+  impulse: "impulse engines", warp: "warp coils", comms: "comms array", sensors: "sensors", weapons: "weapons",
 };
 
 export function alertLevel(threats) {

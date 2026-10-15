@@ -21,6 +21,7 @@ export const ROAM_RATE = 1 / 1500;   // per second outside home space, at impuls
 const ROAM_GRACE = 300;              // s into a mission before any roamer
 export const ROAM_COOLDOWN = 600;    // s after any encounter ends
 const ROAM_SPAWN = 50;               // u — how far off a roamer appears
+const WRECK_FOR = 90;                // s a disabled cube drifts dark before it's gone
 
 // FNV-1a: a stable number from a string.
 function hash(s) {
@@ -50,6 +51,8 @@ export class Collective {
     this.time = 0;
     this._quietUntil = ROAM_GRACE;
     this._guardOf = null;         // the held star the current cube guards, if any
+    this.defeated = new Set();    // held systems whose guard we've disabled this mission
+    this._wreckUntil = null;
   }
 
   // ship: { pos, facing, mode, straining } (cube.js). Returns the cube's events,
@@ -59,8 +62,15 @@ export class Collective {
     const ev = [];
     if (!this.cube) this._spawn(dt, ship, ev);
     if (!this.cube) return ev;
-    for (const e of this.cube.step(dt, ship)) ev.push(e);
-    if (this.cube.mode === "lost") {
+    for (const e of this.cube.step(dt, ship)) {
+      ev.push(e);
+      if (e.type === "disabled") {
+        if (this._guardOf) this.defeated.add(this._guardOf.id);
+        this._wreckUntil = this.time + WRECK_FOR;
+      }
+    }
+    if (this.cube.mode === "lost" || (this._wreckUntil != null && this.time >= this._wreckUntil)) {
+      this._wreckUntil = null;
       this.cube = null;
       this._guardOf = null;
       this._quietUntil = this.time + ROAM_COOLDOWN;
@@ -71,6 +81,7 @@ export class Collective {
   _spawn(dt, ship, ev) {
     // A held system: its guard is out whenever you're near.
     for (const s of this.held) {
+      if (this.defeated.has(s.id)) continue;
       const sp = this.posOf(s);
       if (Math.hypot(...sp.map((c, i) => c - ship.pos[i])) > GUARD_WAKE) continue;
       const a = (hash(s.id) % 360) * Math.PI / 180;

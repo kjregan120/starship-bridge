@@ -27,6 +27,7 @@ export default [
   { id: "thermal-systems", label: "Thermal Systems", dept: "engineering", learnRate: 1, description: "Radiators, coolant loops, heat management." },
   { id: "shield-ops", label: "Shield Operations", dept: "tactical", learnRate: 1, description: "Emitter control, shield harmonics, recharge cycles." },
   { id: "tactical-analysis", label: "Tactical Analysis", dept: "tactical", learnRate: 0.9, description: "Threat assessment and defensive planning." },
+  { id: "weapons", label: "Weapons", dept: "tactical", learnRate: 0.9, description: "Phaser targeting, fire control, frequency rotation." },
   { id: "security-ops", label: "Security Operations", dept: "security", learnRate: 1, description: "Access control, patrols, emergency response." },
   { id: "medicine", label: "Medicine", dept: "medical", learnRate: 0.6, description: "Diagnosis and treatment, surgery, radiation medicine." },
   { id: "life-support", label: "Life Support", dept: "operations", learnRate: 1, description: "Atmosphere processing, scrubbers, pressure control." },

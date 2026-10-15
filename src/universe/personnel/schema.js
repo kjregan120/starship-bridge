@@ -23,6 +23,13 @@ const profileMigrations = {
     p.post.shift ??= postBySlot[p.post.slot]?.shift ?? "alpha";
     p.post.crossTrain ??= null;
   },
+  // 2 → 3: the ship has weapons. Tactical crew have trained on them about as
+  // much as on threat assessment; everyone else starts untrained.
+  2: (p) => {
+    if (p.post.dept === "tactical" && !p.skills.weapons) {
+      p.skills.weapons = { xp: Math.round(p.skills["tactical-analysis"]?.xp ?? 0) };
+    }
+  },
 };
 const careerMigrations = {
   // 1 → 2: the clock gains an hour of the day.
