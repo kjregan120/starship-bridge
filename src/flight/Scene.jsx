@@ -7,6 +7,7 @@ import { useUI } from "./store.js";
 import { makeStarMaterials, CORONA_EXTENT } from "./starShader.js";
 import { makeFlareLoops } from "./flareLoops.js";
 import { ejecta } from "./ejecta.js";
+import { warpStreaks } from "./warpStreaks.js";
 import { lens, BASE_FOV } from "./lens.js";
 import { makePlanetParts, AURORA_EXTENT } from "./planetShader.js";
 
@@ -328,53 +329,30 @@ function Ejecta() {
 }
 
 // ---- warp streaks ----------------------------------------------------------
-// Streaks travel along local +z in their own frame; the wrapping group is
-// rotated each frame so that local +z tracks view.facing, keeping the streak
-// direction aligned with the direction the ship is actually pointed instead
-// of a fixed world axis.
+// See warpStreaks.js. The streaks are laid out along local +z; the wrapping
+// group is turned each frame so local +z is view.facing, so they always rush
+// out of the point the ship is aimed at.
 const STREAK_AXIS = new THREE.Vector3(0, 0, 1);
 function WarpStreaks() {
   const groupRef = useRef();
-  const ref = useRef();
-  const COUNT = 500;
-  const positions = useMemo(() => {
-    const a = new Float32Array(COUNT * 3);
-    for (let i = 0; i < COUNT; i++) {
-      a[i * 3] = (Math.random() - 0.5) * 30;
-      a[i * 3 + 1] = (Math.random() - 0.5) * 30;
-      a[i * 3 + 2] = -Math.random() * 80;
-    }
-    return a;
-  }, []);
-  useFrame((_, dt) => {
-    if (!ref.current) return;
-    const active = sim.mode === "warp";
-    ref.current.visible = active;
-    if (groupRef.current) {
-      const f = view.facing;
-      groupRef.current.quaternion.setFromUnitVectors(STREAK_AXIS, new THREE.Vector3(f[0], f[1], f[2]).normalize());
-    }
-    if (!active) return;
-    const arr = ref.current.geometry.attributes.position.array;
-    for (let i = 0; i < COUNT; i++) {
-      arr[i * 3 + 2] += 160 * dt;
-      if (arr[i * 3 + 2] > 10) {
-        arr[i * 3 + 2] = -80;
-        arr[i * 3] = (Math.random() - 0.5) * 30;
-        arr[i * 3 + 1] = (Math.random() - 0.5) * 30;
-      }
-    }
-    ref.current.geometry.attributes.position.needsUpdate = true;
+  const flashRef = useRef();
+  const { size } = useThree();
+  const facing = useMemo(() => new THREE.Vector3(), []);
+  useFrame((state, dt) => {
+    const pr = state.gl.getPixelRatio();
+    warpStreaks.tick(Math.min(dt, 0.1), sim.mode === "warp", sim.warpFactor, size.width * pr, size.height * pr, pr);
+    const f = view.facing;
+    groupRef.current.quaternion.setFromUnitVectors(STREAK_AXIS, facing.set(f[0], f[1], f[2]).normalize());
+    groupRef.current.visible = warpStreaks.visible;
+    flashRef.current.visible = warpStreaks.flashing;
   });
   return (
-    <group ref={groupRef}>
-      <points ref={ref}>
-        <bufferGeometry>
-          <bufferAttribute attach="attributes-position" count={COUNT} array={positions} itemSize={3} />
-        </bufferGeometry>
-        <pointsMaterial size={0.25} color="#cfe0ff" transparent opacity={0.9} depthWrite={false} blending={THREE.AdditiveBlending} />
-      </points>
-    </group>
+    <>
+      <group ref={groupRef}>
+        <mesh geometry={warpStreaks.geometry} material={warpStreaks.material} frustumCulled={false} />
+      </group>
+      <mesh ref={flashRef} geometry={warpStreaks.flashGeometry} material={warpStreaks.flashMaterial} frustumCulled={false} renderOrder={10} />
+    </>
   );
 }
 
