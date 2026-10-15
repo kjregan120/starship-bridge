@@ -63,6 +63,13 @@ function getCtx() {
   return ctx;
 }
 
+// The receiver's input, for anything that makes its own sound instead of
+// playSignal() — a broadcast song (anthem.js). Goes through the same tune
+// filter and analyser.
+export function receiver() {
+  return { ac: getCtx(), input: tuneFilter };
+}
+
 // Returns the shared analyser, so a visualizer can start reading data
 // (silence, pre-gesture) before LISTEN is ever pressed.
 export function getAnalyser() {

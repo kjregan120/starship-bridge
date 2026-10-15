@@ -16,8 +16,14 @@
 //   atmosphere  — additive limb glow, lit side only (same ray trick as the
 //                 star corona in starShader.js)
 //   rings       — some gas giants, with the planet's shadow cast across them
+//   eruptions   — lava moons: volcanoes throwing glowing lava into the sky
+//                 (eruptions.js), which also flare the calderas
+//   glow        — any body with `glow` set: a faint self-light in its own colour
+//   aurora      — any body with `aurora` set in universe.json: glowing
+//                 curtains around both poles ("rainbow" is the only style)
 import * as THREE from "three";
 import { SIMPLEX, seedFor } from "./starShader.js";
+import { makeEruptions } from "./eruptions.js";
 
 const KIND_DEFINE = {
   "gas giant": "KIND_GAS",
@@ -30,6 +36,7 @@ const KIND_DEFINE = {
   "moon-cratered": "KIND_MOON",
   "moon-icy": "KIND_ICE",          // + ICY_MOON: craters punched through the ice
   "moon-volcanic": "KIND_VOLCANIC",
+  "moon-lava": "KIND_LAVA",         // dark crust, glowing seams, erupting volcanoes
 };
 
 const ATMOSPHERE = {
@@ -276,6 +283,40 @@ vec3 sp = p + uSeed;
   plEmit += vec3(1.0, 0.35, 0.08) * lava * mix(0.6, 1.6, plNight);
   plRough = 0.9;
 
+#elif defined(KIND_LAVA)
+  // Dark basalt crust cracked into plates, molten rock glowing in the seams,
+  // and a few volcanoes: cones with glowing calderas and lava running down
+  // their flanks, flaring when they erupt (uVentHeat, from the eruptions).
+  float plate = fbm(sp * 3.0);
+  plCol = uBase * (0.55 + 0.6 * plate);
+  plCol *= 1.0 + 0.25 * clamp(plCraters(p, 6.0, uSeed.x), -0.6, 0.3);
+  float s1 = pow(1.0 - abs(snoise(sp * 2.2)), 16.0);
+  float s2 = pow(1.0 - abs(snoise(sp.yzx * 5.0 + 3.0)), 30.0);
+  float flow = 0.6 + 0.4 * fbm3(sp * 7.0 + vec3(0.0, uTime * 0.08, 0.0));
+  float seam = clamp(s1 + 0.35 * s2, 0.0, 1.0) * flow;
+  plH = 0.25 * plate - 0.3 * seam;
+  float heat = seam;
+  for (int i = 0; i < VENTS; i++) {
+    vec3 v = uVents[i];
+    float d = length(p - v) / 0.16;
+    vec3 t1 = normalize(cross(v, abs(v.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+    float ang = atan(dot(p, cross(v, t1)), dot(p, t1));
+    float cone = exp(-d * d * 1.2), caldera = exp(-d * d * 12.0);
+    plH += 0.9 * cone - 0.7 * caldera;
+    plCol = mix(plCol, uBase * 0.5, cone * 0.6);                    // fresh black flows on the flanks
+    // Rivers of lava down the flanks, longer while it's erupting.
+    float river = pow(1.0 - abs(snoise(vec3(ang * 2.5, d * 0.8 - uTime * 0.1, float(i) * 7.0))), 14.0);
+    heat += river * smoothstep(1.6 + uVentHeat[i], 0.25, d) * (0.7 + 0.6 * uVentHeat[i]);
+    heat += caldera * (1.4 + 2.5 * uVentHeat[i]);
+  }
+  heat = clamp(heat, 0.0, 3.0);
+  // Molten colour: deep red where it's cooling, orange, yellow-white at the hottest.
+  vec3 molten = mix(vec3(0.5, 0.04, 0.0), vec3(1.0, 0.35, 0.03), smoothstep(0.1, 0.7, heat));
+  molten = mix(molten, vec3(1.0, 0.85, 0.45), smoothstep(1.2, 2.6, heat));
+  plCol = mix(plCol, vec3(0.12, 0.03, 0.01), smoothstep(0.05, 0.4, heat));   // the crust at the edges is scorched
+  plEmit += molten * heat * mix(1.1, 1.8, plNight);
+  plRough = 0.95;
+
 #elif defined(KIND_ROCKY) || defined(KIND_MOON)
   float cr = plCraters(p, 4.0, uSeed.x) + 0.5 * plCraters(p, 9.0, uSeed.y);
   if (plDetail > 0.0) cr += 0.25 * plDetail * plCraters(p, 19.0, uSeed.z);
@@ -290,6 +331,12 @@ vec3 sp = p + uSeed;
   plCol *= mix(1.0, 0.55, maria);
   plCol *= 1.0 + 0.25 * clamp(cr, -0.6, 0.3);                    // shadowed floors, bright rims
   plRough = 0.95;
+#endif
+
+#ifdef HAS_GLOW
+  // A body that glows faintly in its own colour (universe.json "glow") —
+  // keeps its colour on the night side instead of fading to grey.
+  plEmit += plCol * uGlow * mix(0.6, 1.0, plNight);
 #endif
 
 #ifdef HAS_ATMO
@@ -348,6 +395,12 @@ vObjPos = position;
   vec3 dp = normalize(position);
   #if defined(KIND_VOLCANIC)
     float dh = 0.3 * fbm3(dp * 4.0 + uSeed);
+  #elif defined(KIND_LAVA)
+    float dh = 0.25 * fbm3(dp * 3.0 + uSeed);
+    for (int i = 0; i < VENTS; i++) {
+      float d = length(dp - uVents[i]) / 0.16;
+      dh += 1.6 * exp(-d * d * 1.2) - 1.1 * exp(-d * d * 12.0);
+    }
   #else
     float dh = plCraters(dp, 4.0, uSeed.x) + 0.5 * plCraters(dp, 9.0, uSeed.y);
     #if defined(KIND_ICE)
@@ -371,13 +424,19 @@ function surfaceMaterial(kind, uniforms, bump, extraDefines) {
     shader.vertexShader = shader.vertexShader
       .replace("#include <common>", `#include <common>
 uniform float uTime; uniform vec3 uSeed; uniform float uDisp;
+#ifdef KIND_LAVA
+uniform vec3 uVents[VENTS];
+#endif
 varying vec3 vObjPos;
 ${NOISE_HELPERS}`)
       .replace("#include <begin_vertex>", `#include <begin_vertex>\n${DISPLACE}`);
     shader.fragmentShader = shader.fragmentShader
       .replace("#include <common>",
         `#include <common>
-uniform float uTime; uniform vec3 uSeed; uniform vec3 uBase; uniform vec3 uAtmo; uniform float uBump;
+uniform float uTime; uniform vec3 uSeed; uniform vec3 uBase; uniform vec3 uAtmo; uniform float uBump; uniform float uGlow;
+#ifdef KIND_LAVA
+uniform vec3 uVents[VENTS]; uniform float uVentHeat[VENTS];
+#endif
 ${LIGHT_UNIFORMS}
 varying vec3 vObjPos;
 ${HELPERS}`)
@@ -394,7 +453,7 @@ normal = plPerturbNormal(-vViewPosition, normal, vec2(dFdx(plH), dFdy(plH)) * uB
   // Every kind shares this onBeforeCompile's source; key the program cache
   // on the kind and its feature defines so three doesn't hand one variant's
   // program to another.
-  const key = `planet-${def}-${hasAtmo}-${Object.keys(extraDefines).sort().join("-")}`;
+  const key = `planet-${def}-${hasAtmo}-${Object.entries(extraDefines).map(([k, v]) => (v === "" ? k : `${k}=${v}`)).sort().join("-")}`;
   mat.customProgramCacheKey = () => key;
   uniforms.uBump = { value: bump };
   return mat;
@@ -511,6 +570,72 @@ void main(){
 }
 `;
 
+// ---- aurora -------------------------------------------------------------------
+// Curtains of light around both magnetic poles. The shell is drawn back-face
+// only, with no depth test, and each pixel marches its view ray through the
+// space just above the surface (1.03–1.6 radii), stopping where the ray
+// hits the body — so the curtains show over the disc as well as standing
+// up off the limb. Each curtain is a thin band of latitude that wanders
+// with longitude and time, bright at its foot and fading with height,
+// streaked along its length; the colour runs through the rainbow along
+// the oval and climbs with altitude. Brightest on the night side.
+const auroraVertex = atmoVertex;
+const auroraFragment = /* glsl */ `
+uniform vec3 uCenter; uniform vec3 uSun; uniform vec3 uAxis;
+uniform float uRadius; uniform float uTime;
+varying vec3 vWorldPos;
+${SIMPLEX}
+vec3 auHue(float h){ return clamp(abs(mod(h * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0); }
+void main(){
+  const float TOP = 1.6, FOOT = 1.03;
+  vec3 ray = normalize(vWorldPos - cameraPosition);
+  vec3 oc = cameraPosition - uCenter;
+  float b = dot(oc, ray);
+  // Where the ray is inside the outer shell...
+  float cOut = dot(oc, oc) - pow(uRadius * TOP, 2.0);
+  float hOut = b * b - cOut;
+  if (hOut <= 0.0) discard;
+  float t0 = max(0.0, -b - sqrt(hOut)), t1 = -b + sqrt(hOut);
+  // ...up to where it meets the body.
+  float cIn = dot(oc, oc) - pow(uRadius * FOOT, 2.0);
+  float hIn = b * b - cIn;
+  if (hIn > 0.0 && -b - sqrt(hIn) > 0.0) t1 = -b - sqrt(hIn);
+  if (t1 <= t0) discard;
+
+  vec3 e1 = normalize(cross(uAxis, abs(uAxis.x) < 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 0.0, 1.0)));
+  vec3 e2 = cross(uAxis, e1);
+  vec3 sunDir = normalize(uSun - uCenter);
+  const int STEPS = 56;
+  float dt = (t1 - t0) / float(STEPS);
+  vec3 col = vec3(0.0);
+  for (int i = 0; i < STEPS; i++) {
+    vec3 x = oc + ray * (t0 + (float(i) + 0.5) * dt);
+    float len = length(x);
+    float h = len / uRadius;
+    vec3 n = x / len;
+    float lat = asin(clamp(dot(n, uAxis), -1.0, 1.0));
+    float lon = atan(dot(n, e2), dot(n, e1));
+    float pole = sign(lat);
+    // The oval, wandering with longitude and time (each pole its own way).
+    float latC = 1.08 + 0.07 * sin(3.0 * lon + uTime * 0.25 + pole) + 0.05 * snoise(vec3(lon * 1.5, uTime * 0.08, pole * 3.0));
+    float band = exp(-pow((abs(lat) - latC) / 0.035, 2.0));
+    if (band < 0.01) continue;
+    float up = (h - FOOT) / (TOP - FOOT);
+    float vert = smoothstep(0.0, 0.06, up) * pow(1.0 - up, 1.6);
+    // Rays along the curtain, and folds that drift along the oval.
+    float rays = 0.55 + 0.45 * snoise(vec3(lon * 40.0, uTime * 0.6, pole));
+    float folds = 0.35 + 0.65 * smoothstep(-0.3, 0.6, snoise(vec3(lon * 5.0 - uTime * 0.15, uTime * 0.1, pole * 7.0)));
+    float night = mix(1.0, 0.4, smoothstep(-0.15, 0.45, dot(n, sunDir)));
+    vec3 hue = auHue(fract(lon / 6.2832 + up * 0.6 + uTime * 0.02));
+    col += hue * band * vert * rays * folds * night * (dt / uRadius) * 11.0;
+  }
+  gl_FragColor = vec4(col, 1.0);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}
+`;
+export const AURORA_EXTENT = 1.6;
+
 const frac = (x) => x - Math.floor(x);
 
 // Everything needed to draw one body. `tick(t, center, sun)` updates the
@@ -523,6 +648,7 @@ export function makePlanetParts(obj, star) {
     ...(kind === "moon-icy" ? { ICY_MOON: "" } : {}),
     ...(obj.habitable && (kind === "class-M" || kind === "ocean") ? { HAS_CITIES: "" } : {}),
     ...(displace ? { HAS_DISPLACE: "" } : {}),
+    ...(obj.glow ? { HAS_GLOW: "" } : {}),
   };
   const seed = seedFor(obj.id);
   const base = jitterColor(obj.color || "#888888", seed);
@@ -542,9 +668,20 @@ export function makePlanetParts(obj, star) {
   const surfUniforms = {
     uTime: time, uSeed: { value: seed }, uBase: { value: base }, uAtmo: { value: atmoColor }, ...light,
     uDisp: { value: displace ? r * 0.045 : 0 },
+    uGlow: { value: obj.glow ?? 0 },
   };
   // Bump strength per kind — terrain worlds get relief, cloud-tops barely any.
-  const bump = { "gas giant": 0.4, toxic: 0.4, ocean: 0.8, "class-M": 1.0, ice: 1.5, desert: 1.5, "moon-icy": 1.5, "moon-volcanic": 1.5 }[kind] ?? 2.5;
+  // Volcanoes: where they are (fixed by the body's seed) and how hot each
+  // is right now (eruptions.js flares them).
+  let eruptions = null;
+  if (kind === "moon-lava") {
+    eruptions = makeEruptions(r, seed, obj.volcanoes ?? 2);
+    extraDefines.VENTS = eruptions.vents.length;
+    surfUniforms.uVents = { value: eruptions.vents };
+    surfUniforms.uVentHeat = { value: eruptions.heat };
+  }
+  // Bump strength per kind — terrain worlds get relief, cloud-tops barely any.
+  const bump = { "gas giant": 0.4, toxic: 0.4, ocean: 0.8, "class-M": 1.0, ice: 1.5, desert: 1.5, "moon-icy": 1.5, "moon-volcanic": 1.5, "moon-lava": 1.2 }[kind] ?? 2.5;
   const surface = surfaceMaterial(kind, surfUniforms, bump, extraDefines);
 
   let clouds = null;
@@ -587,23 +724,38 @@ export function makePlanetParts(obj, star) {
   // Axial tilt, so gas-giant bands and rings aren't all flat to the galaxy.
   const tilt = (frac(seed.z * 0.53) - 0.5) * 0.7;
 
+  let aurora = null;
+  if (obj.aurora) {
+    aurora = new THREE.ShaderMaterial({
+      uniforms: {
+        uCenter: { value: new THREE.Vector3() }, uSun: { value: new THREE.Vector3() }, uTime: time,
+        // The poles: +Y turned by the tilt about Z, as Scene.jsx tilts the body.
+        uAxis: { value: new THREE.Vector3(-Math.sin(tilt), Math.cos(tilt), 0) },
+        uRadius: { value: r },
+      },
+      vertexShader: auroraVertex, fragmentShader: auroraFragment,
+      side: THREE.BackSide, transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
+    });
+  }
+
   return {
-    surface, clouds, atmosphere, rings, tilt,
+    surface, clouds, atmosphere, rings, aurora, eruptions, tilt,
     // Displaced bodies need enough vertices for craters to show on the outline.
     segments: displace ? (isMoon ? 96 : 128) : 64,
     atmoExtent: atmo?.extent ?? 1,
     tick(t, center, sun) {
+      eruptions?.update(t);
       time.value = t;
       light.uCenter.value.copy(center);
       light.uSun.value.copy(sun);
-      for (const m of [atmosphere, rings?.material]) {
+      for (const m of [atmosphere, rings?.material, aurora]) {
         if (!m) continue;
         m.uniforms.uCenter.value.copy(center);
         m.uniforms.uSun.value.copy(sun);
       }
     },
     dispose() {
-      surface.dispose(); clouds?.dispose(); atmosphere?.dispose(); rings?.material.dispose();
+      surface.dispose(); clouds?.dispose(); atmosphere?.dispose(); rings?.material.dispose(); aurora?.dispose(); eruptions?.dispose();
     },
   };
 }

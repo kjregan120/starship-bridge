@@ -4,6 +4,7 @@
 // status bar and Comms.jsx both just read useUI's `listening` field to know
 // what's playing; only this module touches the actual audio nodes.
 import { playSignal } from "./audio.js";
+import { playSong } from "./anthem.js";
 import { useUI } from "./store.js";
 import { cancelDecode } from "./decodeEngine.js";
 
@@ -11,7 +12,8 @@ let stopFn = null;
 
 export function startListening(obj, profile) {
   stopListening();
-  stopFn = playSignal(profile);
+  // A body that broadcasts a song (universe.json `song`) plays that instead.
+  stopFn = (obj.song && playSong(obj.song)) || playSignal(profile);
   useUI.getState().setListening({ id: obj.id, name: obj.name });
 }
 

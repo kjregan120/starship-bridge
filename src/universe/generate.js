@@ -287,6 +287,29 @@ function starName() {
     + " " + randInt(1, 99);
 }
 
+// --- hand-placed bodies -------------------------------------------------------
+// Added after generation without drawing from rng(), so every generated body
+// stays exactly as the seed made it. Each names the body it orbits, and is
+// skipped if that body doesn't exist (a different seed).
+const LANDMARKS = [
+  {
+    id: "m-isla", name: "Isla", type: "moon", parentName: "Altair 70 V",
+    kind: "cratered", color: "#ff4fa8", glow: 0.3, aurora: "rainbow", song: "isla", mass: 0.0005, size: 0.4,
+    orbit: { radius: 3.4, period: 30, phase: 1.2, inclination: 0.08 },
+    scan: "Isla, a pink moon. Rose-coloured regolith, rich in manganese minerals, glows softly in Altair's white light. Its parent's magnetic field funnels the stellar wind onto both poles, where a rainbow aurora dances day and night. Comms reports an unusual signal: it's broadcasting a song. Requested by a young member of the crew's family."
+  },
+  {
+    id: "m-graham", name: "Graham", type: "moon", parentName: "Solace Major 37 I",
+    kind: "lava", color: "#2b2522", volcanoes: 2, song: "waltz", mass: 0.0006, size: 0.42,
+    orbit: { radius: 3.0, period: 24, phase: 4.1, inclination: -0.06 },
+    scan: "Graham, a lava moon. Tidal heating from its parent and the nearby star keeps the mantle molten: a black basalt crust split by glowing seams, and two active volcanoes that throw lava high above the surface. Comms reports an unusual signal: it's broadcasting a song."
+  }
+];
+for (const { parentName, ...body } of LANDMARKS) {
+  const parent = objects.find((o) => o.name === parentName);
+  if (parent) objects.push({ ...body, parent: parent.id });
+}
+
 // --- write ------------------------------------------------------------------
 const universe = {
   seed,

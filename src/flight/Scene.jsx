@@ -7,7 +7,7 @@ import { useUI } from "./store.js";
 import { makeStarMaterials, CORONA_EXTENT } from "./starShader.js";
 import { makeFlareLoops } from "./flareLoops.js";
 import { ejecta } from "./ejecta.js";
-import { makePlanetParts } from "./planetShader.js";
+import { makePlanetParts, AURORA_EXTENT } from "./planetShader.js";
 
 // How far out a star system's planets/moons start rendering as real (if tiny)
 // spheres, instead of only appearing once that star becomes THE nearest one.
@@ -97,6 +97,8 @@ function BodyMesh({ obj }) {
       <group rotation={[0, 0, parts.tilt]}>
         <mesh ref={spin} material={parts.surface}>
           <sphereGeometry args={[r, segs, segs]} />
+          {/* Lava thrown from the volcanoes turns with the surface it came from. */}
+          {parts.eruptions && <primitive object={parts.eruptions.points} />}
         </mesh>
         {parts.clouds && (
           <mesh ref={cloudSpin} material={parts.clouds} scale={1.015}>
@@ -111,6 +113,11 @@ function BodyMesh({ obj }) {
       </group>
       {parts.atmosphere && (
         <mesh material={parts.atmosphere} scale={parts.atmoExtent}>
+          <sphereGeometry args={[r, 32, 32]} />
+        </mesh>
+      )}
+      {parts.aurora && (
+        <mesh material={parts.aurora} scale={AURORA_EXTENT}>
           <sphereGeometry args={[r, 32, 32]} />
         </mesh>
       )}

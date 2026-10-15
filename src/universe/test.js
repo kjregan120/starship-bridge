@@ -395,6 +395,25 @@ console.log("\n11. Watches, learning by doing, and repairs");
     Object.values(old.profiles).every((p) => ["alpha", "beta", "gamma"].includes(p.post.shift) && p.schemaVersion === 2));
 }
 
+console.log("\n12. Hand-placed bodies");
+{
+  const rose = objects.find((o) => o.name === "Isla");
+  const parent = rose && byId[rose.parent];
+  check(`Altair 70 has its pink moon, Isla`, rose?.type === "moon" && rose.color === "#ff4fa8" && parent?.name === "Altair 70 V");
+  const siblings = objects.filter((o) => o.parent === rose?.parent && o.id !== rose.id);
+  check(`...in a clear orbit, outside its planet`, rose.orbit.radius > parent.size * 2 &&
+    siblings.every((o) => Math.abs(o.orbit.radius - rose.orbit.radius) > 1), `r ${rose.orbit.radius}, planet size ${parent.size.toFixed(2)}`);
+}
+
+{
+  const lava = objects.find((o) => o.name === "Graham");
+  const planet = lava && byId[lava.parent];
+  check(`Solace Major 37 has its lava moon, Graham, with volcanoes and a song`, lava?.kind === "lava" && lava.volcanoes === 2 &&
+    lava.song === "waltz" && planet?.name === "Solace Major 37 I");
+  check(`...in a clear orbit, outside its planet`, lava.orbit.radius > planet.size * 2 &&
+    objects.filter((o) => o.parent === lava.parent && o.id !== lava.id).every((o) => Math.abs(o.orbit.radius - lava.orbit.radius) > 1));
+}
+
 console.log("\n13. Wear and tear");
 {
   const quiet = { mode: "impulse", throttle: 0.3, flux: { heat: 0, rad: 0 } };
