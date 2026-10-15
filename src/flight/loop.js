@@ -6,9 +6,31 @@
 // The ship's systems (ship.js) step here too, on real time, and hand the sim
 // back what the engines can actually do.
 import { sim, view, ship, shipFlux } from "./engine.js";
+import { ejecta, ejectaClock } from "./ejecta.js";
+import { cmeStep, cmeEffects } from "../universe/cme.js";
 
 const MAX_BANK = 0.35;     // ~20° roll at most
 const BANK_PER_YAW = 0.45; // rad of roll per rad/s of yaw — full turnRate (π/4) ≈ 20°
+
+// Coronal mass ejections in flight (ejecta.js): any whose front sweeps over
+// the ship this tick hits it; the rest still bearing down on it are
+// returned for the alerts (ship.incoming), soonest first.
+function cmeTick() {
+  const t = ejectaClock();
+  ejecta.prune(t);
+  const incoming = [];
+  for (const c of ejecta.clouds) {
+    const s = cmeStep(c, sim.pos, t);
+    if (s.hit) {
+      const r = ship.hit({ ...cmeEffects(s.energy), from: s.from, facing: sim.facing });
+      const where = r.through > 0 ? `${r.side} hull damaged${r.damaged.length ? ` (${r.damaged.join(", ")})` : ""}` : "shields holding";
+      ship.onEvent(r.through > 0 ? "deny" : "info", `Coronal mass ejection from ${c.source ?? "a star"} — impact ${r.side}, ${where}.`);
+    } else if (s.eta != null) {
+      incoming.push({ kind: "cme", source: c.source, eta: s.eta, energy: s.energy });
+    }
+  }
+  return incoming.sort((a, b) => a.eta - b.eta);
+}
 
 export function startSimLoop() {
   let raf;
@@ -24,6 +46,7 @@ export function startSimLoop() {
     // second is plenty for a sum over every star.
     if ((fluxIn -= dt) <= 0) { flux = shipFlux(); fluxIn = 0.25; }
     ship.step(dt, { mode: sim.mode, throttle: sim.throttle, warpFactor: sim.warpFactor, flux });
+    ship.incoming = cmeTick();
     sim.impulseFactor = ship.impulseFactor;
     sim.warpLimit = ship.warpMax;
     sim.warpInhibit = ship.warpInhibit;

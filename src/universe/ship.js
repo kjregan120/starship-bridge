@@ -143,6 +143,9 @@ export class ShipSystems {
     this.interference = 0;   // comms
     this.noise = 0;          // sensors
     this.flux = { heat: 0, rad: 0, source: null };
+    // Hazards on their way to the ship that something outside it is tracking
+    // (coronal mass ejections — cme.js, set by the flight loop): { kind, source, eta, energy }.
+    this.incoming = [];
     this.harm = {};          // what's hurting the crew right now, by cause (health/s)
     this.crewLost = false;
     // How fast key readings are moving (per second, smoothed) — for the
@@ -645,7 +648,7 @@ export class ShipSystems {
       dose: this.dose, doseRate: this.doseRate,
       interference: this.interference, noise: this.noise,
       commsQuality: this.commsQuality(), sensorQuality: this.sensorQuality(),
-      flux: { ...this.flux },
+      flux: { ...this.flux }, incoming: this.incoming.map((x) => ({ ...x })),
       impulseFactor: this.impulseFactor, warpMax: this.warpMax, warpInhibit: this.warpInhibit,
       lastHit: this._lastHit ? { ...this._lastHit } : null,
       repairs: Object.fromEntries(Object.entries(this.repairs).map(([k, v]) => [k, { ...v }])),

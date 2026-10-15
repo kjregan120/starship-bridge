@@ -10,6 +10,7 @@ import { newCareer, crewProfiles, startMission, checkpoint, reassign, crossTrain
 import { ageOn, skillLevel, qualifiedDepts, CORE_SKILL } from "./personnel/profile.js";
 import { migrateCareer } from "./personnel/schema.js";
 import { parseMagnify, clampZoom, MAX_ZOOM } from "../flight/lens.js";
+import { cmeStep, cmeEta, cmeEnergy, cmeEffects, frontReach } from "./cme.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const universe = JSON.parse(readFileSync(join(here, "universe.json"), "utf8"));
@@ -486,6 +487,59 @@ console.log("\n14. The magnify order");
   for (const [rest, want] of cases)
     check(`magnify "${rest}" → ${JSON.stringify(want)}`, same(parseMagnify(rest), want), JSON.stringify(parseMagnify(rest)));
   check(`zoom is clamped to 1–${MAX_ZOOM}`, clampZoom(0.2) === 1 && clampZoom(50) === MAX_ZOOM && clampZoom(3) === 3);
+}
+
+console.log("\n15. Coronal mass ejections hit the ship");
+{
+  // A cloud launched along +x from the origin; play it forward a tick at a time.
+  const cloud = (o = {}) => ({ at: [0, 0, 0], d: [1, 0, 0], t0: 0, speed: 4, cone: 0.45, radius: 2, ...o });
+  const play = (c, pos, until = 120, dt = 0.05) => {
+    const hits = [];
+    let firstEta = null;
+    for (let t = 0; t < until; t += dt) {
+      const s = cmeStep(c, typeof pos === "function" ? pos(t) : pos, t);
+      if (firstEta == null && s.eta != null) firstEta = s.eta;
+      if (s.hit) hits.push({ t, ...s });
+    }
+    return { hits, firstEta };
+  };
+  const onAxis = play(cloud(), [20, 0, 0]);
+  check("a front reaching the ship hits it exactly once", onAxis.hits.length === 1, `${onAxis.hits.length} hits`);
+  const h = onAxis.hits[0];
+  check("the predicted ETA matches when it lands", h && Math.abs(onAxis.firstEta - h.t) < 0.2,
+    `eta ${onAxis.firstEta?.toFixed(1)}s, landed ${h?.t.toFixed(1)}s`);
+  check("the blow comes from the star's side", h && h.from[0] < -0.99, h && h.from.map((x) => x.toFixed(2)).join(","));
+  check("outside the cone, nothing", play(cloud(), [0, 20, 0]).hits.length === 0);
+  check("beyond where it gets before it fades, nothing",
+    play(cloud(), [2000, 0, 0]).hits.length === 0 && cmeEta(cloud(), [2000, 0, 0], 0) == null);
+  check("entering the cloud behind its front does nothing",
+    play(cloud(), (t) => (t < 30 ? [0, 30, 0] : [20, 0, 0])).hits.length === 0);
+  check("a faster cloud hits harder", cmeEnergy(cloud({ speed: 7 }), 12, 0) > 2.5 * cmeEnergy(cloud(), 12, 0));
+  check("further out it's weaker", cmeEnergy(cloud(), 60, 0) < 0.15 * cmeEnergy(cloud(), 12, 0));
+  check("the flanks are weaker than the nose", cmeEnergy(cloud(), 12, 0.9) < cmeEnergy(cloud(), 12, 0));
+  check("the front accelerates, then coasts",
+    frontReach(1, 4) < 0.5 * 4 && Math.abs(frontReach(61, 4) - frontReach(60, 4) - 0.95 * 4) < 0.01);
+
+  // Through ship.hit(): an ordinary one at 12u is soaked by full shields;
+  // a giant one on half shields gets through, damages the hull and doses the crew.
+  const ordinary = new ShipSystems({ seed: 7 });
+  const r1 = ordinary.hit({ ...cmeEffects(cmeEnergy(cloud({ speed: 3.75 }), 12, 0)), from: [-1, 0, 0], facing: [1, 0, 0] });
+  check("an ordinary eruption at 12u: full shields hold", r1.through === 0 && ordinary.shields < 1, `shields ${ordinary.shields.toFixed(2)}`);
+  const giant = new ShipSystems({ seed: 7 });
+  giant.shields = 0.5;
+  const dose = () => giant.roster.alive().reduce((a, m) => a + m.dose, 0);
+  const dose0 = dose();
+  const r2 = giant.hit({ ...cmeEffects(cmeEnergy(cloud({ speed: 7.5, cone: 0.3 }), 12, 0)), from: [-1, 0, 0], facing: [1, 0, 0] });
+  check("a giant one on half shields gets through to the hull", r2.through > 0 && giant.hull.aft < 1, `aft hull ${giant.hull.aft.toFixed(2)}`);
+  check("...doses the crew", dose() > dose0);
+  check("...and fills comms with static", giant.interference > 0.3, giant.interference.toFixed(2));
+
+  const warned = new ShipSystems({ seed: 7 });
+  warned.shields = 0.2;
+  warned.incoming = [{ kind: "cme", source: "Testar", eta: 42, energy: 0.6 }];
+  const t = assessThreats(warned).find((x) => x.id === "cme");
+  check("an inbound CME is a red alert, with an ETA, when shields won't hold",
+    t && t.level === "red" && t.eta === 42 && t.action === "power shields 150", t && `${t.level} · ${t.action}`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

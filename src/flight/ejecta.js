@@ -12,7 +12,15 @@
 //
 // Clouds are launched in absolute world coordinates and drawn relative to
 // the ship (floating origin), so they stay put while you fly through them.
+//
+// Times are on ejectaClock(), not a Canvas clock: a Canvas's clock restarts
+// whenever the view is remounted, and a cloud keeps travelling — and can
+// still hit the ship (universe/cme.js, checked in loop.js) — while you're
+// looking at another station.
 import * as THREE from "three";
+
+const T0 = performance.now();
+export const ejectaClock = () => (performance.now() - T0) / 1000;
 
 const SLOTS = 8;          // clouds alive at once; the oldest is reused
 const PARTICLES = 3000;   // per cloud
@@ -160,10 +168,10 @@ function makeEjecta() {
     geometry,
     material,
     clouds,
-    // `t`: launch time (the render clock); `at`: launch point, absolute world
+    // `t`: launch time (ejectaClock); `at`: launch point, absolute world
     // [x,y,z]; `d`: unit direction (Vector3); `radius`: the star's; `cone`:
-    // half-angle (rad); `speed`: u/s.
-    launch({ t, at, d, radius, cone, speed, color: hex }) {
+    // half-angle (rad); `speed`: u/s; `source`: the star's name.
+    launch({ t, at, d, radius, cone, speed, color: hex, source }) {
       let slot = 0;
       for (let i = 1; i < SLOTS; i++) if (launch.getX(i) < launch.getX(slot)) slot = i;
       origin.setXYZ(slot, at[0], at[1], at[2]);
@@ -172,13 +180,16 @@ function makeEjecta() {
       _col.set(hex || "#ffffff");
       color.setXYZ(slot, _col.r, _col.g, _col.b);
       origin.needsUpdate = dir.needsUpdate = launch.needsUpdate = color.needsUpdate = true;
-      clouds.push({ at: [...at], d: [d.x, d.y, d.z], t0: t, speed, cone, radius });
+      clouds.push({ at: [...at], d: [d.x, d.y, d.z], t0: t, speed, cone, radius, source });
       if (clouds.length > SLOTS) clouds.shift();
     },
     tick(t, ship, pxScale) {
       material.uniforms.uTime.value = t;
       material.uniforms.uShip.value.set(ship[0], ship[1], ship[2]);
       material.uniforms.uPxScale.value = pxScale;
+      this.prune(t);
+    },
+    prune(t) {
       while (clouds.length && t - clouds[0].t0 > EJECTA_LIFE) clouds.shift();
     },
   };

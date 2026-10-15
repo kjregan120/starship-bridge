@@ -6,7 +6,7 @@ import { sim, view, galaxyPoints, nearestStar, starsWithin, blackholesWithin, be
 import { useUI } from "./store.js";
 import { makeStarMaterials, CORONA_EXTENT } from "./starShader.js";
 import { makeFlareLoops } from "./flareLoops.js";
-import { ejecta } from "./ejecta.js";
+import { ejecta, ejectaClock } from "./ejecta.js";
 import { warpStreaks } from "./warpStreaks.js";
 import { lens, BASE_FOV } from "./lens.js";
 import { makePlanetParts, AURORA_EXTENT } from "./planetShader.js";
@@ -138,25 +138,24 @@ function StarMesh({ obj }) {
   const loops = useMemo(() => makeFlareLoops(obj, mats), [mats]);
   useEffect(() => () => { mats.surface.dispose(); mats.corona.dispose(); }, [mats]);
   useEffect(() => () => loops.dispose(), [loops]);
-  const clock = useRef(0);
   useEffect(() => {
     // Launch from the torn apex, in absolute world space: the cloud is the
     // shared pool's from here on, not this star's.
     loops.onBurst = (d, span, height, giant) => {
       const c = worldPos(obj), lift = r * (1 + height);
       ejecta.launch({
-        t: clock.current,
+        t: ejectaClock(),
         at: [c[0] + d.x * lift, c[1] + d.y * lift, c[2] + d.z * lift],
         d, radius: r, color: obj.color,
         cone: Math.min(0.8, 0.15 + span * 0.9),
         speed: (giant ? 5 + Math.random() * 3 : 2.5 + Math.random() * 2.5),
+        source: obj.name,
       });
     };
     return () => { loops.onBurst = null; };
   }, [loops]);
   useFrame((state, dt) => {
     if (!g.current) return;
-    clock.current = state.clock.elapsedTime;
     const p = rel(worldPos(obj));
     g.current.position.set(p[0], p[1], p[2]);
     g.current.rotation.y += dt * 0.05;
@@ -322,7 +321,7 @@ function Ejecta() {
   useFrame((state) => {
     // gl_PointSize is in device pixels, `size` in CSS pixels.
     const pxScale = (size.height * state.gl.getPixelRatio()) / (2 * Math.tan((camera.fov * Math.PI) / 360));
-    ejecta.tick(state.clock.elapsedTime, sim.pos, pxScale);
+    ejecta.tick(ejectaClock(), sim.pos, pxScale);
   });
   // Placed per particle in the vertex shader, so three's bounds are meaningless.
   return <points geometry={ejecta.geometry} material={ejecta.material} frustumCulled={false} />;

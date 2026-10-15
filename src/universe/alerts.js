@@ -140,6 +140,22 @@ export function assessThreats(ship) {
     });
   }
 
+  // ---- incoming coronal mass ejection (cme.js; ship.incoming, set by the loop) ----
+  // Red if the front carries more than the shields can take.
+  const cme = (ship.incoming ?? []).find((x) => x.kind === "cme" && x.energy >= 0.05);
+  if (cme) {
+    const through = cme.energy > ship.shields;
+    add({
+      id: "cme", level: through ? "red" : "yellow", sev: through ? 85 : 50,
+      title: `Coronal mass ejection inbound${cme.source ? ` — ${cme.source}` : ""}`,
+      detail: `Impact ${Math.round(cme.energy * 100)}% of shield strength`, eta: cme.eta,
+      action: ship.settings.shields < 1.5 ? "power shields 150" : null,
+      say: `${through ? "Warning. " : ""}Coronal mass ejection${cme.source ? ` from ${cme.source}` : ""} will reach us${sayEta(cme.eta)}.` +
+        (through ? " Shields will not hold." : "") +
+        (ship.settings.shields < 1.5 ? " Recommend diverting power to shields." : ""),
+    });
+  }
+
   // ---- reactor ----
   if (ship.reactor.scrammed) {
     add({
