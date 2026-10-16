@@ -149,6 +149,7 @@ export function checkpoint(c, roster) {
 const CAUSE_TEXT = {
   radiation: "acute radiation exposure", oxygen: "oxygen deprivation", pressure: "decompression",
   heat: "heat injury", co2: "carbon dioxide poisoning", breach: "hull breach",
+  suit: "suit failure on an away mission", toxic: "toxic exposure on an away mission",
 };
 
 // Write the mission into everyone's file.

@@ -13,6 +13,8 @@
 //   quarters — off watch, resting
 //   sickbay  — being treated (starboard section)
 //   shelter  — in the shielded core, off duty
+//   away     — on a planet's surface with the captain (away.js); off the
+//              ship's books for staffing, and hurt by the surface, not the ship
 // What hurts the crew is worked out per person from where they are: a
 // breach kills the people in that section first, engineering takes the
 // reactor's heat, the shelter cuts radiation to 15%.
@@ -117,11 +119,12 @@ export function statusOf(m) {
 const FITNESS = { healthy: 1, injured: 0.6, critical: 0, dead: 0 };
 
 // Radiation reaching each location, relative to the ship-wide figure.
-const LOC_RAD = { fore: 1.0, port: 0.9, starboard: 0.9, aft: 0.8, shelter: 0.15 };
+const LOC_RAD = { fore: 1.0, port: 0.9, starboard: 0.9, aft: 0.8, shelter: 0.15, away: 0 };
 
 const HARM_WORDS = {
   radiation: "radiation exposure", oxygen: "oxygen deprivation", pressure: "decompression",
   heat: "heat", co2: "carbon dioxide poisoning", breach: "hull breach",
+  suit: "suit air running out", toxic: "a toxic atmosphere", survivor: "injuries",
 };
 export const causeWords = (c) => HARM_WORDS[c] ?? "injuries";
 // Ranks as the computer says them.
@@ -179,7 +182,7 @@ export class Roster {
     const b = new Set(breached);
     let n = 0;
     for (const m of this.crew) {
-      if (m.health <= 0 || m.location === "sickbay") continue;
+      if (m.health <= 0 || m.location === "sickbay" || m.location === "away") continue;
       const to = this.postFor(m, b);
       if (statusOf(m) === "critical" && to !== "shelter") continue;
       if (to !== m.location) { m.location = to; n++; }
@@ -196,7 +199,7 @@ export class Roster {
   }
   // Where someone actually is right now (a hull section, or the shelter).
   whereIs(m) {
-    return m.location === "station" ? m.section : m.location === "quarters" ? m.quarters : m.location === "sickbay" ? SICKBAY : "shelter";
+    return m.location === "station" ? m.section : m.location === "quarters" ? m.quarters : m.location === "sickbay" ? SICKBAY : m.location === "away" ? "away" : "shelter";
   }
 
   // Fit, skilled, rested crew at their posts against what a watch needs —
@@ -249,7 +252,7 @@ export class Roster {
     m.dept = dept;
     m.section = DEPARTMENTS[dept].section;
     m.watchRates = watchPerHour(m.profile, dept);
-    if (m.location !== "sickbay" && statusOf(m) !== "critical") m.location = this.postFor(m);
+    if (m.location !== "sickbay" && m.location !== "away" && statusOf(m) !== "critical") m.location = this.postFor(m);
     return m;
   }
   find(id) { return this.crew.find((m) => m.id === id); }
@@ -307,10 +310,32 @@ export class Roster {
     let n = 0;
     for (const m of this.crew) {
       const st = statusOf(m);
-      if ((st === "injured" || st === "critical") && m.location !== "sickbay") { m.location = "sickbay"; n++; }
+      if ((st === "injured" || st === "critical") && m.location !== "sickbay" && m.location !== "away") { m.location = "sickbay"; n++; }
     }
     return n;
   }
+
+  // An away team leaving the ship (away.js): off their posts until recalled.
+  // `awayHarm` is what the surface is doing to each of them (health/s by
+  // cause) and `awayTire` how hard the going is — set by the away mission.
+  sendAway(ids) {
+    for (const id of ids) {
+      const m = this.find(id);
+      if (!m || m.health <= 0) continue;
+      m.location = "away"; m.awayHarm = {}; m.awayTire = 1;
+    }
+  }
+  // Back aboard. The hurt go to sickbay; everyone else where orders say.
+  recall(ids, breached = []) {
+    const b = new Set(breached);
+    for (const id of ids) {
+      const m = this.find(id);
+      if (!m || m.location !== "away") continue;
+      delete m.awayHarm; delete m.awayTire;
+      m.location = m.health <= 0 ? "station" : statusOf(m) === "healthy" ? this.postFor(m, b) : b.has(SICKBAY) ? "shelter" : "sickbay";
+    }
+  }
+  away() { return this.crew.filter((m) => m.location === "away"); }
 
   // ---------------- simulation ----------------
   // `ship`: the ShipSystems doing the stepping. `t`: mission time (s).
@@ -340,15 +365,20 @@ export class Roster {
       const where = this.whereIs(m);
 
       // What's hurting this person, by cause (health/s before toughness).
+      // On the surface that's the surface's business (away.js), not the ship's.
       const h = {};
-      if (ship.harm.oxygen) h.oxygen = ship.harm.oxygen;
-      if (ship.harm.co2) h.co2 = ship.harm.co2;
-      if (ship.harm.pressure) h.pressure = ship.harm.pressure;
-      const rad = ship.doseRate * LOC_RAD[where] * (exposed(where) ? 2 : 1);
-      m.dose += rad * dt;
-      if (rad > 0.002) h.radiation = (rad - 0.002) * 0.5;
-      if (ship.heat > 0.85) h.heat = (ship.heat - 0.85) * 0.02 * (where === "aft" ? 1.6 : 1);
-      if (breached.has(where)) h.breach = 0.01 + (0.3 - ship.hull[where]) * 0.05;
+      if (m.location === "away") {
+        Object.assign(h, m.awayHarm);
+      } else {
+        if (ship.harm.oxygen) h.oxygen = ship.harm.oxygen;
+        if (ship.harm.co2) h.co2 = ship.harm.co2;
+        if (ship.harm.pressure) h.pressure = ship.harm.pressure;
+        const rad = ship.doseRate * LOC_RAD[where] * (exposed(where) ? 2 : 1);
+        m.dose += rad * dt;
+        if (rad > 0.002) h.radiation = (rad - 0.002) * 0.5;
+        if (ship.heat > 0.85) h.heat = (ship.heat - 0.85) * 0.02 * (where === "aft" ? 1.6 : 1);
+        if (breached.has(where)) h.breach = 0.01 + (0.3 - ship.hull[where]) * 0.05;
+      }
 
       const harm = Object.values(h).reduce((a, b) => a + b, 0) / m.toughness;
       m.hurting = harm > 0;
@@ -367,7 +397,9 @@ export class Roster {
       if (m.health > ceiling) m.health = Math.max(ceiling, m.health - 0.001 * dt);
 
       // ---- fatigue and practice ----
-      if (m.location === "station") {
+      if (m.location === "away") {
+        m.fatigue = Math.min(1, m.fatigue + TIRE * hours * (m.awayTire ?? 1));
+      } else if (m.location === "station") {
         m.fatigue = Math.min(1, m.fatigue + TIRE * hours);
         const k = hours * (ship.strain?.(m.dept) ?? 1);
         for (const [sk, r] of Object.entries(m.watchRates)) this._practise(m, sk, r * k * this._mentorBonus(m, sk, mentored), t);

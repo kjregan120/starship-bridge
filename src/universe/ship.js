@@ -110,6 +110,10 @@ const EVA_LEVEL = 2;                // Qualified in EVA to work outside
 const EVA_MAX_SVH = 0.5;            // and no more radiation than this (Sv/h) outside
 const XP_PER_REPAIR = 60;           // practice in the job's skill per unit of health restored
 const XP_DC_PER_REPAIR = 20;        // and in damage control
+// Spare parts (brought back by away teams — missions.js) make component
+// repairs go faster, and are used up doing it.
+const PARTS_BOOST = 1.75;
+const PARTS_PER_HEALTH = 2;         // parts used per whole component restored
 
 const HISTORY_LEN = 120;            // samples, one a second
 const clamp01 = (x) => Math.max(0, Math.min(1, x));
@@ -137,6 +141,9 @@ export class ShipSystems {
     this.power = { demand: {}, alloc: {}, sat: {}, total: 0 };
 
     this.fuel = 0.85;
+    // What away teams have brought back: spare parts for repairs, and
+    // science (readings and samples) — see addStores().
+    this.stores = { parts: 0, science: 0 };
     this.heat = 0.2;
     this.shields = 1;
     // o2 is the mix, pressure the cabin; what the crew can actually breathe
@@ -194,6 +201,23 @@ export class ShipSystems {
     return this.settings[system];
   }
   resetPower() { for (const k in this.settings) this.settings[k] = 1; }
+  // An away team's haul (missions.js payout): fuel straight into the tanks,
+  // parts and science into stores.
+  addStores({ fuel = 0, parts = 0, science = 0 } = {}) {
+    this.fuel = Math.min(1, this.fuel + fuel);
+    this.stores.parts += parts;
+    this.stores.science += science;
+  }
+  // The transporter can't send through shields: they drop to nothing and
+  // have to build back up.
+  // Lowered on purpose, so not an alarm: the trend doesn't read it as
+  // shields falling, and there's no "below 25%" warning for it.
+  dropShieldsForTransport() {
+    this.shields = 0;
+    if (this._prev) this._prev.shields = 0;
+    this.rate.shields = Math.max(0, this.rate.shields);
+    this._alerts.shields = true;
+  }
   // Put repair effort on one component or hull section first; null for
   // the default (everything, worst-damaged weighted most).
   setRepairFocus(target) {
@@ -490,9 +514,11 @@ export class ShipSystems {
         const { skill } = MAINTENANCE[c];
         const crew = this.roster.workers([dept], skill);
         const units = crew.reduce((a, x) => a + x.w, 0) * (weight(c, this.health[c]) / total);
-        const rate = REPAIR_RATE * units * (this.health[c] < REBUILD_AT ? REBUILD_SLOW : 1);
+        const parts = this.stores.parts > 0 ? PARTS_BOOST : 1;
+        const rate = REPAIR_RATE * units * parts * (this.health[c] < REBUILD_AT ? REBUILD_SLOW : 1);
         const gain = Math.min(1 - this.health[c], rate * dt);
         this.health[c] += gain;
+        if (parts > 1) this.stores.parts = Math.max(0, this.stores.parts - gain * PARTS_PER_HEALTH);
         repairs[c] = { rate, crew: crew.length, blocked: crew.length ? null : `no ${DEPARTMENTS[dept].label.toLowerCase()} crew at their posts` };
         // A spreading fault outruns the repairs until the crew contain it.
         const spreading = this.wear?.active[c];
@@ -661,7 +687,7 @@ export class ShipSystems {
         total: this.power.total, want: this.power.want,
         demand: { ...this.power.demand }, alloc: { ...this.power.alloc }, sat: { ...this.power.sat },
       },
-      fuel: this.fuel, heat: this.heat, shields: this.shields,
+      fuel: this.fuel, heat: this.heat, shields: this.shields, stores: { ...this.stores },
       atmo: { ...this.atmo }, crew: this.crew, roster: this.roster.snapshot(),
       dose: this.dose, doseRate: this.doseRate,
       interference: this.interference, noise: this.noise,

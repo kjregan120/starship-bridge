@@ -1,0 +1,90 @@
+/* surface.css — the away mission HUD, laid over the full-screen surface view. */
+.surface {
+  position: fixed; inset: 0; background: #000; overflow: hidden;
+  color: var(--text, #ffddbb);
+  font-family: "Antonio", "Oswald", "Arial Narrow", sans-serif; letter-spacing: 0.05em;
+}
+.surface canvas { display: block; }
+
+.sf-top {
+  position: absolute; top: 10px; left: 10px; right: 10px;
+  display: flex; align-items: center; gap: 14px; padding: 6px 18px;
+  background: rgba(255, 156, 51, 0.92); color: #000; border-radius: 40px 8px 8px 8px;
+  font-weight: 600; text-transform: uppercase; pointer-events: none;
+}
+.sf-place { font-size: 1.1rem; }
+.sf-feature { color: #402a00; }
+.sf-clock { font-variant-numeric: tabular-nums; }
+.sf-air { margin-left: auto; display: flex; align-items: center; gap: 8px; padding: 2px 12px; background: #000; color: var(--blue, #6699ff); border-radius: 12px; font-variant-numeric: tabular-nums; }
+.sf-badge { padding: 2px 12px; border-radius: 12px; background: #000; }
+.sf-badge.storm { color: #e8f060; animation: comms-pulse 1.2s ease-in-out infinite; }
+.sf-badge.alert.red { color: var(--red, #ff5544); animation: comms-pulse 0.8s ease-in-out infinite; }
+.sf-badge.alert.yellow { color: var(--gold, #ffcc33); }
+
+.sf-meter { display: inline-block; width: 70px; height: 7px; background: #222; border-radius: 4px; overflow: hidden; vertical-align: middle; }
+.sf-meter > span { display: block; height: 100%; background: var(--blue, #6699ff); transition: width 0.25s linear; }
+.sf-meter.warn > span { background: var(--gold, #ffcc33); }
+.sf-meter.crit > span { background: var(--red, #ff5544); }
+
+.sf-team, .sf-mission {
+  position: absolute; top: 62px; width: 260px; padding: 8px 10px;
+  background: rgba(8, 8, 16, 0.78); border-radius: 6px; pointer-events: none;
+}
+.sf-team { left: 10px; border-left: 5px solid var(--gold, #ffcc33); }
+.sf-mission { right: 10px; width: 300px; border-right: 5px solid var(--blue, #6699ff); }
+.sf-title { font-size: 0.72rem; color: var(--amber, #ff9c33); letter-spacing: 0.15em; margin-bottom: 6px; }
+.sf-member { display: grid; grid-template-columns: 6px 1fr auto; grid-template-rows: auto auto; column-gap: 8px; padding: 4px 0; font-size: 0.85rem; }
+.sf-member .sf-dept { grid-row: 1 / 3; border-radius: 3px; }
+.sf-member .sf-name { color: var(--peach, #ffcc99); }
+.sf-member .sf-doing { grid-column: 2 / 4; color: #8a8; font-size: 0.72rem; text-transform: lowercase; }
+.sf-member.critical .sf-doing, .sf-member.dead .sf-doing { color: var(--red, #ff5544); }
+.sf-member.dead .sf-name { text-decoration: line-through; color: #777; }
+.sf-member.hurting .sf-name { color: var(--red, #ff5544); animation: comms-pulse 0.9s ease-in-out infinite; }
+.sf-note { margin-top: 6px; font-size: 0.72rem; color: var(--gold, #ffcc33); }
+
+.sf-brief { font-family: "Oswald", sans-serif; font-size: 0.78rem; color: #bbb; letter-spacing: 0.02em; margin-bottom: 8px; line-height: 1.35; }
+.sf-obj { display: flex; justify-content: space-between; font-size: 0.85rem; padding: 2px 0; color: var(--peach, #ffcc99); }
+.sf-obj.done { color: #7fd07f; }
+.sf-ready { margin-top: 6px; color: #7fd07f; font-size: 0.8rem; }
+.sf-compass { margin-top: 10px; display: flex; align-items: center; gap: 10px; }
+.sf-arrow { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; background: #000; color: var(--blue, #6699ff); font-size: 1rem; }
+.sf-compass-text { font-size: 0.78rem; color: #9bf; }
+
+.sf-console {
+  position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); width: min(760px, calc(100% - 20px));
+  background: rgba(8, 8, 16, 0.82); border-radius: 8px; padding: 8px 12px; border-bottom: 4px solid var(--amber, #ff9c33);
+}
+.sf-comm { border-bottom: 1px solid #333; margin-bottom: 4px; padding-bottom: 4px; font-size: 0.8rem; color: var(--lilac, #cc88ff); }
+.sf-comm .fline { color: var(--lilac, #cc88ff); }
+.sf-log { max-height: 7.6em; overflow: hidden; font-family: "Oswald", sans-serif; font-size: 0.85rem; }
+.sf-cmd { display: flex; gap: 8px; margin-top: 6px; }
+.sf-cmd .prompt { color: var(--gold, #ffcc33); }
+.sf-cmd input { flex: 1; background: #000; border: 1px solid #333; color: var(--peach, #ffcc99); padding: 4px 8px; font: inherit; border-radius: 4px; }
+.sf-cmd input:focus { outline: none; border-color: var(--gold, #ffcc33); }
+.sf-keys { margin-top: 4px; font-size: 0.68rem; color: #777; text-align: center; }
+
+/* Labels over people and things, drawn by drei's <Html>. */
+.sf-tag {
+  white-space: nowrap; padding: 1px 6px; border-radius: 8px; background: rgba(0, 0, 0, 0.55);
+  color: var(--peach, #ffcc99); font: 600 12px "Oswald", sans-serif; pointer-events: none; user-select: none;
+}
+.sf-tag.poi.anomaly { color: #59e0ff; }
+.sf-tag.poi.specimen { color: #9cff6a; }
+.sf-tag.poi.deposit { color: #ffd06a; }
+.sf-tag.poi.done { color: #888; }
+
+/* The transporter: a shimmer that washes over the view. */
+.beam-fx { position: absolute; inset: 0; pointer-events: none; z-index: 20;
+  background:
+    repeating-linear-gradient(90deg, rgba(160, 200, 255, 0) 0 6px, rgba(160, 200, 255, 0.18) 6px 7px),
+    radial-gradient(ellipse at center, rgba(190, 220, 255, 0.55), rgba(120, 160, 255, 0.1) 70%);
+  animation: beam-shimmer 1.3s ease-in-out forwards; }
+.beam-fx.up { animation-duration: 2.6s; }
+.surface-beam.down { animation: beam-out 1.3s ease-out forwards; }
+@keyframes beam-shimmer { 0% { opacity: 0; filter: brightness(1); } 50% { opacity: 1; filter: brightness(1.6); } 100% { opacity: 1; filter: brightness(2.4); } }
+@keyframes beam-out { 0% { opacity: 1; } 100% { opacity: 0; } }
+
+@media (max-width: 900px) {
+  .sf-team, .sf-mission { width: 200px; font-size: 0.8rem; }
+  .sf-mission { top: auto; bottom: 170px; }
+}
