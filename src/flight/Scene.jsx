@@ -2,12 +2,15 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Stars } from "@react-three/drei";
 import { useRef, useMemo, useState, useEffect } from "react";
 import * as THREE from "three";
-import { sim, view, galaxyPoints, nearestStar, starsWithin, blackholesWithin, beaconsWithin, systemBodies, worldPos } from "./engine.js";
+import { sim, view, collective, tactical, galaxyPoints, nearestStar, starsWithin, blackholesWithin, beaconsWithin, systemBodies, worldPos } from "./engine.js";
 import { useUI } from "./store.js";
 import { makeStarMaterials, CORONA_EXTENT } from "./starShader.js";
 import { makeFlareLoops } from "./flareLoops.js";
-import { ejecta } from "./ejecta.js";
-import { makePlanetParts } from "./planetShader.js";
+import { ejecta, ejectaClock } from "./ejecta.js";
+import { warpStreaks } from "./warpStreaks.js";
+import { lens, BASE_FOV } from "./lens.js";
+import { makePlanetParts, AURORA_EXTENT } from "./planetShader.js";
+import { makeCubeMesh } from "./cubeMesh.js";
 
 // How far out a star system's planets/moons start rendering as real (if tiny)
 // spheres, instead of only appearing once that star becomes THE nearest one.
@@ -97,6 +100,8 @@ function BodyMesh({ obj }) {
       <group rotation={[0, 0, parts.tilt]}>
         <mesh ref={spin} material={parts.surface}>
           <sphereGeometry args={[r, segs, segs]} />
+          {/* Lava thrown from the volcanoes turns with the surface it came from. */}
+          {parts.eruptions && <primitive object={parts.eruptions.points} />}
         </mesh>
         {parts.clouds && (
           <mesh ref={cloudSpin} material={parts.clouds} scale={1.015}>
@@ -111,6 +116,11 @@ function BodyMesh({ obj }) {
       </group>
       {parts.atmosphere && (
         <mesh material={parts.atmosphere} scale={parts.atmoExtent}>
+          <sphereGeometry args={[r, 32, 32]} />
+        </mesh>
+      )}
+      {parts.aurora && (
+        <mesh material={parts.aurora} scale={AURORA_EXTENT}>
           <sphereGeometry args={[r, 32, 32]} />
         </mesh>
       )}
@@ -129,25 +139,24 @@ function StarMesh({ obj }) {
   const loops = useMemo(() => makeFlareLoops(obj, mats), [mats]);
   useEffect(() => () => { mats.surface.dispose(); mats.corona.dispose(); }, [mats]);
   useEffect(() => () => loops.dispose(), [loops]);
-  const clock = useRef(0);
   useEffect(() => {
     // Launch from the torn apex, in absolute world space: the cloud is the
     // shared pool's from here on, not this star's.
     loops.onBurst = (d, span, height, giant) => {
       const c = worldPos(obj), lift = r * (1 + height);
       ejecta.launch({
-        t: clock.current,
+        t: ejectaClock(),
         at: [c[0] + d.x * lift, c[1] + d.y * lift, c[2] + d.z * lift],
         d, radius: r, color: obj.color,
         cone: Math.min(0.8, 0.15 + span * 0.9),
         speed: (giant ? 5 + Math.random() * 3 : 2.5 + Math.random() * 2.5),
+        source: obj.name,
       });
     };
     return () => { loops.onBurst = null; };
   }, [loops]);
   useFrame((state, dt) => {
     if (!g.current) return;
-    clock.current = state.clock.elapsedTime;
     const p = rel(worldPos(obj));
     g.current.position.set(p[0], p[1], p[2]);
     g.current.rotation.y += dt * 0.05;
@@ -313,80 +322,115 @@ function Ejecta() {
   useFrame((state) => {
     // gl_PointSize is in device pixels, `size` in CSS pixels.
     const pxScale = (size.height * state.gl.getPixelRatio()) / (2 * Math.tan((camera.fov * Math.PI) / 360));
-    ejecta.tick(state.clock.elapsedTime, sim.pos, pxScale);
+    ejecta.tick(ejectaClock(), sim.pos, pxScale);
   });
   // Placed per particle in the vertex shader, so three's bounds are meaningless.
   return <points geometry={ejecta.geometry} material={ejecta.material} frustumCulled={false} />;
 }
 
+// ---- a Collective cube, when one is out (collective.js, cubeMesh.js) -------
+// Polls for the cube rather than subscribing: it comes and goes from the
+// sim loop, and a new cube (a new id) gets fresh meshes.
+function CollectiveCube() {
+  const [id, setId] = useState(null);
+  useFrame(() => {
+    const now = collective.cube?.id ?? null;
+    if (now !== id) setId(now);
+  });
+  return id ? <CubeBody key={id} /> : null;
+}
+function CubeBody() {
+  const cube = collective.cube;
+  const parts = useMemo(() => makeCubeMesh(cube.blocks.length), [cube]);
+  useEffect(() => () => {
+    parts.mesh.geometry.dispose(); parts.mesh.material.dispose();
+    parts.beams.forEach((b) => b.material.dispose());
+    parts.tractor.material.dispose();
+    [...parts.phasers, ...parts.flashes].forEach((b) => b.material.dispose());
+  }, [parts]);
+  useFrame((state) => {
+    if (collective.cube === cube) parts.update(cube, sim.pos, state.clock.elapsedTime, tactical.shots, tactical.time);
+  });
+  return (
+    <>
+      <primitive object={parts.mesh} />
+      {parts.beams.map((b, i) => <primitive key={i} object={b} />)}
+      <primitive object={parts.tractor} />
+      {parts.phasers.map((b, i) => <primitive key={`p${i}`} object={b} />)}
+      {parts.flashes.map((b, i) => <primitive key={`f${i}`} object={b} />)}
+    </>
+  );
+}
+
 // ---- warp streaks ----------------------------------------------------------
-// Streaks travel along local +z in their own frame; the wrapping group is
-// rotated each frame so that local +z tracks view.facing, keeping the streak
-// direction aligned with the direction the ship is actually pointed instead
-// of a fixed world axis.
+// See warpStreaks.js. The streaks are laid out along local +z; the wrapping
+// group is turned each frame so local +z is view.facing, so they always rush
+// out of the point the ship is aimed at.
 const STREAK_AXIS = new THREE.Vector3(0, 0, 1);
 function WarpStreaks() {
   const groupRef = useRef();
-  const ref = useRef();
-  const COUNT = 500;
-  const positions = useMemo(() => {
-    const a = new Float32Array(COUNT * 3);
-    for (let i = 0; i < COUNT; i++) {
-      a[i * 3] = (Math.random() - 0.5) * 30;
-      a[i * 3 + 1] = (Math.random() - 0.5) * 30;
-      a[i * 3 + 2] = -Math.random() * 80;
-    }
-    return a;
-  }, []);
-  useFrame((_, dt) => {
-    if (!ref.current) return;
-    const active = sim.mode === "warp";
-    ref.current.visible = active;
-    if (groupRef.current) {
-      const f = view.facing;
-      groupRef.current.quaternion.setFromUnitVectors(STREAK_AXIS, new THREE.Vector3(f[0], f[1], f[2]).normalize());
-    }
-    if (!active) return;
-    const arr = ref.current.geometry.attributes.position.array;
-    for (let i = 0; i < COUNT; i++) {
-      arr[i * 3 + 2] += 160 * dt;
-      if (arr[i * 3 + 2] > 10) {
-        arr[i * 3 + 2] = -80;
-        arr[i * 3] = (Math.random() - 0.5) * 30;
-        arr[i * 3 + 1] = (Math.random() - 0.5) * 30;
-      }
-    }
-    ref.current.geometry.attributes.position.needsUpdate = true;
+  const flashRef = useRef();
+  const { size } = useThree();
+  const facing = useMemo(() => new THREE.Vector3(), []);
+  useFrame((state, dt) => {
+    const pr = state.gl.getPixelRatio();
+    warpStreaks.tick(Math.min(dt, 0.1), sim.mode === "warp", sim.warpFactor, size.width * pr, size.height * pr, pr);
+    const f = view.facing;
+    groupRef.current.quaternion.setFromUnitVectors(STREAK_AXIS, facing.set(f[0], f[1], f[2]).normalize());
+    groupRef.current.visible = warpStreaks.visible;
+    flashRef.current.visible = warpStreaks.flashing;
   });
   return (
-    <group ref={groupRef}>
-      <points ref={ref}>
-        <bufferGeometry>
-          <bufferAttribute attach="attributes-position" count={COUNT} array={positions} itemSize={3} />
-        </bufferGeometry>
-        <pointsMaterial size={0.25} color="#cfe0ff" transparent opacity={0.9} depthWrite={false} blending={THREE.AdditiveBlending} />
-      </points>
-    </group>
+    <>
+      <group ref={groupRef}>
+        <mesh geometry={warpStreaks.geometry} material={warpStreaks.material} frustumCulled={false} />
+      </group>
+      <mesh ref={flashRef} geometry={warpStreaks.flashGeometry} material={warpStreaks.flashMaterial} frustumCulled={false} renderOrder={10} />
+    </>
   );
 }
 
 // ---- camera rig: first-person at the ship --------------------------------
+// Magnification (lens.js) narrows the fov, and a held target swings the view
+// off the bow onto it — both eased, so a `magnify` order pans and zooms
+// rather than cuts.
+const ZOOM_RATE = 4; // 1/s — about 95% of the way there in 0.75s
+const SNAP_COS = Math.cos((0.5 * Math.PI) / 180); // within half a degree of ahead → lock to it
 function CameraRig() {
   const { camera } = useThree();
-  useFrame(() => {
+  const look = useMemo(() => new THREE.Vector3(...view.facing), []);
+  const want = useMemo(() => new THREE.Vector3(), []);
+  useFrame((_, dt) => {
     const f = view.facing;
+    const k = 1 - Math.exp(-ZOOM_RATE * dt);
+    const target = lens.targetId && sim.byId[lens.targetId];
+    if (target) {
+      const p = rel(worldPos(target));
+      want.set(p[0], p[1], p[2]).normalize();
+    } else {
+      want.set(f[0], f[1], f[2]);
+    }
+    // Ahead with no target and already (nearly) there: lock on, so ordinary
+    // turns track the heading exactly, as they did before there was a lens.
+    if (!target && look.dot(want) > SNAP_COS) look.copy(want);
+    else look.lerp(want, k).normalize();
     // Roll about the view axis after lookAt (local +Z points back at the
     // viewer, so + rotates the horizon clockwise = leaning to port).
     camera.position.set(0, 0, 0);
-    camera.lookAt(f[0] * 10, f[1] * 10, f[2] * 10);
+    camera.lookAt(look.x * 10, look.y * 10, look.z * 10);
     camera.rotateZ(view.bank);
+    const fov = BASE_FOV / lens.zoom;
+    if (Math.abs(camera.fov - fov) > 1e-3) {
+      camera.fov += (fov - camera.fov) * k;
+      camera.updateProjectionMatrix();
+    }
   });
   return null;
 }
 
 export default function Scene() {
   return (
-    <Canvas camera={{ position: [0, 0, 0], fov: 60, near: 0.05, far: 4000 }}>
+    <Canvas camera={{ position: [0, 0, 0], fov: BASE_FOV / lens.zoom, near: 0.05, far: 4000 }}>
       <color attach="background" args={["#01010a"]} />
       <ambientLight intensity={0.08} />
       <CameraRig />
@@ -394,6 +438,7 @@ export default function Scene() {
       <GalaxyField />
       <LocalSystem />
       <Ejecta />
+      <CollectiveCube />
       <WarpStreaks />
     </Canvas>
   );

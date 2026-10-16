@@ -11,15 +11,29 @@
 // data under p.ext.<module> and initialize it when they find it absent.
 
 import { SCHEMA_VERSION } from "./profile.js";
+import COMPLEMENT from "./data/complement.js";
 
-export const CAREER_VERSION = 1;
+export const CAREER_VERSION = 2;
+const postBySlot = Object.fromEntries(COMPLEMENT.map((p) => [p.slot, p]));
 
 // profileMigrations[n] upgrades a version-n profile to n+1.
 const profileMigrations = {
-  // 1: (p) => { p.newSection = defaultFor(p); },
+  // 1 → 2: watches and cross-training. Everyone stands their post's watch.
+  1: (p) => {
+    p.post.shift ??= postBySlot[p.post.slot]?.shift ?? "alpha";
+    p.post.crossTrain ??= null;
+  },
+  // 2 → 3: the ship has weapons. Tactical crew have trained on them about as
+  // much as on threat assessment; everyone else starts untrained.
+  2: (p) => {
+    if (p.post.dept === "tactical" && !p.skills.weapons) {
+      p.skills.weapons = { xp: Math.round(p.skills["tactical-analysis"]?.xp ?? 0) };
+    }
+  },
 };
 const careerMigrations = {
-  // 1: (c) => { ... },
+  // 1 → 2: the clock gains an hour of the day.
+  1: (c) => { c.hour ??= 8; },
 };
 
 export function migrateProfile(p) {

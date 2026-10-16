@@ -2,7 +2,8 @@
 //   left:   departments — how many are fit at their posts, and what that
 //           does to the system they run (crew.js staffing)
 //   centre: the deck plan — everyone drawn where they actually are, by
-//           status; click a section to evacuate it to the shelter
+//           status, the off-watch hollow in their quarters; click a section
+//           to evacuate it to the shelter
 //   right:  the roster by department, sickbay, and the fallen
 // Click anyone (a dot or a name) for their personnel file (PersonnelFile.jsx).
 // Orders live in FlightApp.jsx; the buttons here just give them. The crew
@@ -14,12 +15,16 @@ import { career, sim } from "./engine.js";
 import { exportCareer, importCareer } from "./careerStore.js";
 import { DEPARTMENTS, DEPT_ORDER, causeWords } from "../universe/crew.js";
 import { fullName } from "../universe/personnel/profile.js";
-import { dateOf } from "../universe/personnel/util.js";
+import { dateOf, fmtClock, SHIFT_LABEL } from "../universe/personnel/util.js";
 import { HULL_PATHS } from "./shipShape.js";
 import PersonnelFile from "./PersonnelFile.jsx";
 
 const STATUS_LABEL = { healthy: "FIT", injured: "INJURED", critical: "CRITICAL", dead: "DECEASED" };
 const WHERE_LABEL = { fore: "Fore", aft: "Aft", port: "Port", starboard: "Starboard", shelter: "Shelter" };
+const WATCH_MARK = { alpha: "α", beta: "β", gamma: "γ" };
+// Where someone is, for the roster.
+const whereLabel = (m) =>
+  m.status === "dead" ? "—" : m.location === "sickbay" ? "Sickbay" : m.location === "quarters" ? "Off watch" : WHERE_LABEL[m.where];
 const mmss = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
 const lv = (x) => (x > 0.7 ? "ok" : x > 0.4 ? "warn" : "crit");
 const openFile = (id) => useUI.getState().setPersonnel(id);
@@ -40,6 +45,7 @@ const DOT = 10;                     // spacing when there's room; tighter when c
 function areaOf(m) {
   if (m.location === "shelter") return "shelter";
   if (m.location === "sickbay") return "sickbay";
+  if (m.location === "quarters") return m.quarters;
   return m.section;
 }
 
@@ -80,8 +86,8 @@ function DeckPlan({ roster, ship, onSection }) {
       {dots.map(({ m, x, y, r }) => (
         m.status === "dead"
           ? <path key={m.id} d={`M${x - r},${y - r} L${x + r},${y + r} M${x + r},${y - r} L${x - r},${y + r}`} className="crew-dot dead" onClick={() => openFile(m.id)}><title>{`${m.rank} ${m.name} — deceased`}</title></path>
-          : <circle key={m.id} cx={x} cy={y} r={r} className={`crew-dot ${m.status} ${m.hurting ? "hurting" : ""}`} onClick={() => openFile(m.id)}>
-              <title>{`${m.rank} ${m.name}, ${m.role} — ${STATUS_LABEL[m.status]} ${Math.round(m.health * 100)}%`}</title>
+          : <circle key={m.id} cx={x} cy={y} r={r} className={`crew-dot ${m.status} ${m.hurting ? "hurting" : ""} ${m.location === "quarters" ? "off" : ""}`} onClick={() => openFile(m.id)}>
+              <title>{`${m.rank} ${m.name}, ${m.role} — ${STATUS_LABEL[m.status]} ${Math.round(m.health * 100)}%${m.location === "quarters" ? " · off watch" : ""}`}</title>
             </circle>
       ))}
     </svg>
@@ -96,6 +102,7 @@ function Departments({ roster }) {
         const dep = DEPARTMENTS[d];
         const members = roster.crew.filter((m) => m.dept === d);
         const fitAtPost = members.filter((m) => m.location === "station" && (m.status === "healthy" || m.status === "injured")).length;
+        const tired = members.some((m) => m.location === "station" && m.eff < 0.9);
         const alive = members.filter((m) => m.status !== "dead").length;
         const st = roster.staffing[d];
         const factor = 0.4 + 0.6 * st;
@@ -103,7 +110,9 @@ function Departments({ roster }) {
           <div key={d} className="crew-dept">
             <div className="crew-dept-head">
               <span className="crew-dept-name">{dep.label.toUpperCase()}</span>
-              <span className="crew-dept-count">{fitAtPost} at post · {alive}/{dep.size} alive</span>
+              <span className="crew-dept-count" title={`A ${SHIFT_LABEL[roster.shift]} watch needs ${roster.need[d]}`}>
+                {fitAtPost}/{roster.need[d]} at post{tired ? " · tiring" : ""} · {alive}/{dep.size} alive
+              </span>
             </div>
             <div className="sci-bar"><span className={lv(st)} style={{ width: `${st * 100}%` }} /></div>
             <div className="sci-meter-sub">{dep.effect}{dep.system ? ` — ${Math.round(factor * 100)}%` : ""}</div>
@@ -124,14 +133,15 @@ function Roster({ roster }) {
             <div className="crew-roster-title">{DEPARTMENTS[d].label.toUpperCase()}</div>
             {members.map((m) => (
               <div key={m.id} className={`crew-row ${m.status}`} onClick={() => openFile(m.id)}
-                title={`${m.role} · ${STATUS_LABEL[m.status]} ${Math.round(m.health * 100)}%${m.hurting ? ` · suffering ${causeWords(m.cause)}` : ""} — click for personnel file`}>
+                title={`${m.role} · ${SHIFT_LABEL[m.shift]} watch · ${STATUS_LABEL[m.status]} ${Math.round(m.health * 100)}%${m.hurting ? ` · suffering ${causeWords(m.cause)}` : ""} · ${Math.round((1 - m.fatigue) * 100)}% rested — click for personnel file`}>
                 <span className={`crew-row-dot ${m.status}`} />
                 <span className="crew-row-name">
                   {m.rank} {m.name}
                   {m.dept !== m.homeDept && <span className="crew-row-reassigned"> → {DEPARTMENTS[m.dept].label}</span>}
                 </span>
+                <span className={`crew-row-watch ${m.onWatch ? "on" : ""}`} title={`${SHIFT_LABEL[m.shift]} watch`}>{WATCH_MARK[m.shift]}</span>
                 <span className="crew-row-skill" title="Skill in the department's core skill">L{m.skill}</span>
-                <span className="crew-row-where">{m.status === "dead" ? "—" : m.location === "sickbay" ? "Sickbay" : WHERE_LABEL[m.where]}</span>
+                <span className={`crew-row-where ${m.eff < 0.9 && m.location === "station" ? "tired" : ""}`}>{whereLabel(m)}</span>
                 <span className="crew-row-bar"><span className={lv(m.health)} style={{ width: `${m.health * 100}%` }} /></span>
               </div>
             ))}
@@ -181,8 +191,13 @@ export default function Crew() {
         {roster.sheltered
           ? <button className="crew-btn on" onClick={() => order("resume stations")}>RESUME STATIONS</button>
           : <button className="crew-btn" onClick={() => order("all hands to shelter")}>ALL HANDS TO SHELTER</button>}
+        {roster.allHands
+          ? <button className="crew-btn on" onClick={() => order("stand down")} title="Back to the watch rotation — the off watch go to quarters to rest">STAND DOWN — {Math.round((1 - roster.fatigue) * 100)}% RESTED</button>
+          : <button className="crew-btn" onClick={() => order("call all hands")} disabled={roster.sheltered} title="Everyone to their stations: more hands for a crisis and for repairs, but they tire">CALL ALL HANDS</button>}
         <button className="crew-btn" onClick={() => order("send injured to sickbay")}>SEND INJURED TO SICKBAY</button>
-        <span className="crew-hint">Mission {career.missions} · {dateOf(career.day)} · click a section to evacuate it, a person for their file</span>
+        <span className="crew-hint">
+          Mission {career.missions} · {dateOf(roster.clock.day)} {fmtClock(roster.clock.hour)} · {roster.allHands ? "all hands" : `${SHIFT_LABEL[roster.shift]} watch`} · click a section to evacuate it, a person for their file
+        </span>
         <button className="crew-btn small" onClick={() => exportCareer(career)} title="Download the crew record as a JSON file">EXPORT RECORDS</button>
         <button className="crew-btn small" onClick={() => fileInput.current?.click()} title="Replace the crew record with one from a file">IMPORT</button>
         <input ref={fileInput} type="file" accept="application/json,.json" hidden onChange={onImport} />
@@ -192,7 +207,7 @@ export default function Crew() {
         <div className="sci-center">
           <DeckPlan roster={roster} ship={ship} onSection={(k) => order(`evacuate ${k}`)} />
           <div className="sci-legend">
-            <span className="ok">● FIT</span><span className="warn">● INJURED</span><span className="crit">● CRITICAL</span><span className="dead">✕ LOST</span>
+            <span className="ok">● FIT</span><span className="ok">○ OFF WATCH</span><span className="warn">● INJURED</span><span className="crit">● CRITICAL</span><span className="dead">✕ LOST</span>
           </div>
         </div>
         <div className="sci-col">

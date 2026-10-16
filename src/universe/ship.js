@@ -13,17 +13,32 @@
 // compressed sim time warp runs on, or a warp jump would burn 40x the fuel.
 // Values are 0..1 unless noted. The crew are forty individuals (crew.js),
 // stepped from here; when the last of them dies the run is over.
+//
+// The crew also keep the ship running: whoever is at their post in the
+// department that maintains a damaged component repairs it, faster the
+// more of them there are and the better they know the work (_repairStep).
+// Hull damage is damage control's — security and operations — and past
+// patching from inside (half integrity) it needs suited crew outside,
+// which the radiation has to allow.
+//
+// With `faults` on, things also break on their own: wear and tear, and
+// named faults that the same crews have to fix (faults.js, _wearStep).
 
-import { Roster } from "./crew.js";
+import { Roster, DEPARTMENTS } from "./crew.js";
+import { skillById, levelName } from "./personnel/profile.js";
+import { SHIFT_LABEL } from "./personnel/util.js";
+import { Wear } from "./faults.js";
 
 // ---- power ------------------------------------------------------------------
 // Power is in units where the reactor's rated output is 100. Demand at a
 // 100% setting; engines depend on what the helm is doing.
-const DEMAND = { life: 15, shields: 25, sensors: 10, comms: 8 };
+const DEMAND = { life: 15, shields: 25, weapons: 20, sensors: 10, comms: 8 };
 const IMPULSE_DEMAND = 30;          // at full throttle
 const WARP_DEMAND = (f) => 20 + 8 * f;
 // Who gets fed first when the reactor can't cover everything.
-export const PRIORITY = ["life", "shields", "engines", "sensors", "comms"];
+// Weapons come after the engines: a ship that can still run beats one that
+// can still shoot. Their demand is however hard Tactical is firing (env.weaponsLoad).
+export const PRIORITY = ["life", "shields", "engines", "weapons", "sensors", "comms"];
 export const POWER_SYSTEMS = PRIORITY;
 const SETTING_MAX = 1.5;
 
@@ -33,6 +48,8 @@ const EMERGENCY_POWER = 20;         // batteries while the reactor is scrammed
 const EMERGENCY_THRUST = 10;        // of that, held for the engines — enough to back away
 const SCRAM_RESTART = 30;           // seconds before a restart is attempted
 const NO_FUEL_POWER = 0.25;         // what the reactor manages on an empty tank
+const TRACTOR_DRAG = 0.15;          // impulse left while held in a tractor beam
+export const WEAPONS_OFFLINE = 0.15; // weapons health below this and they can't fire
 
 // ---- fuel ---------------------------------------------------------------
 const FUEL_BURN = 1 / 2400;         // per second at 100 units of output (40 min)
@@ -63,11 +80,36 @@ export const HULL_SECTIONS = ["fore", "aft", "port", "starboard"];
 // Which components sit in which part of the hull — a hit on a side can
 // knock out what's there. Matches the schematic in Science.jsx.
 const SECTION_COMPONENTS = {
-  fore: ["sensors", "comms"],
+  fore: ["sensors", "comms", "weapons"],
   aft: ["reactor", "impulse", "radiators"],
   port: ["warp", "emitters"],
   starboard: ["warp", "life"],
 };
+
+// ---- repairs ----------------------------------------------------------------
+// Who maintains each component, and with what skill. Data, like the
+// personnel catalogs: a new component needs an entry here.
+export const MAINTENANCE = {
+  reactor:   { dept: "engineering", skill: "reactor-ops",     label: "Reactor" },
+  radiators: { dept: "engineering", skill: "thermal-systems", label: "Radiators" },
+  impulse:   { dept: "engineering", skill: "reactor-ops",     label: "Impulse drive" },
+  warp:      { dept: "engineering", skill: "warp-theory",     label: "Warp coils" },
+  emitters:  { dept: "tactical",    skill: "shield-ops",      label: "Shield emitters" },
+  life:      { dept: "operations",  skill: "life-support",    label: "Life support" },
+  comms:     { dept: "comms",       skill: "signals",         label: "Comms array" },
+  sensors:   { dept: "science",     skill: "sensor-analysis", label: "Sensors" },
+  weapons:   { dept: "tactical",    skill: "weapons",         label: "Weapons" },
+};
+const DAMAGE_CONTROL = ["security", "operations"];
+const REPAIR_RATE = 0.0006;         // component health per second per unit of work
+const HULL_REPAIR = 0.0006;         // hull per second per unit of work
+const REBUILD_AT = 0.15;            // below this a component is rebuilt, at REBUILD_SLOW
+const REBUILD_SLOW = 0.3;
+const FOCUS_WEIGHT = 4;             // `repair <x>` puts this much more effort on x
+const EVA_LEVEL = 2;                // Qualified in EVA to work outside
+const EVA_MAX_SVH = 0.5;            // and no more radiation than this (Sv/h) outside
+const XP_PER_REPAIR = 60;           // practice in the job's skill per unit of health restored
+const XP_DC_PER_REPAIR = 20;        // and in damage control
 
 const HISTORY_LEN = 120;            // samples, one a second
 const clamp01 = (x) => Math.max(0, Math.min(1, x));
@@ -75,19 +117,23 @@ const clamp01 = (x) => Math.max(0, Math.min(1, x));
 export class ShipSystems {
   constructor(opts = {}) {
     this.onEvent = opts.onEvent ?? (() => {});
+    this.random = opts.random ?? Math.random;
     // The crew: from the career's personnel files when there is one
     // (opts.profiles, opts.day), else a fresh crew from opts.seed.
-    this.roster = new Roster(opts.profiles ?? opts.seed, opts.day);
+    this.roster = new Roster(opts.profiles ?? opts.seed, opts.day, opts.hour);
     this.time = 0;           // mission time, real seconds
-    // Component health — 0 is destroyed. Nothing repairs itself yet.
+    // Component health — 0 is destroyed. The crew repair it (_repairStep).
     this.health = {
       reactor: 1, radiators: 1, emitters: 1, life: 1,
-      impulse: 1, warp: 1, comms: 1, sensors: 1,
+      impulse: 1, warp: 1, comms: 1, sensors: 1, weapons: 1,
     };
     this.hull = { fore: 1, aft: 1, port: 1, starboard: 1 };
+    // Wear and tear, and the faults it brings (faults.js) — off unless asked
+    // for, so a test ship only breaks when the test breaks it.
+    this.wear = opts.faults ? new Wear(Object.keys(this.health), this.random) : null;
 
     this.reactor = { setting: 1, output: 60, capacity: 100, scrammed: false, restartIn: 0 };
-    this.settings = { life: 1, shields: 1, engines: 1, sensors: 1, comms: 1 };
+    this.settings = { life: 1, shields: 1, engines: 1, weapons: 1, sensors: 1, comms: 1 };
     this.power = { demand: {}, alloc: {}, sat: {}, total: 0 };
 
     this.fuel = 0.85;
@@ -102,6 +148,12 @@ export class ShipSystems {
     this.interference = 0;   // comms
     this.noise = 0;          // sensors
     this.flux = { heat: 0, rad: 0, source: null };
+    // Hazards on their way to the ship that something outside it is tracking
+    // (coronal mass ejections — cme.js, set by the flight loop): { kind, source, eta, energy }.
+    this.incoming = [];
+    // Held in a tractor beam (a Collective cube's — cube.js, set by the
+    // flight loop): no warp, and the impulse engines barely move the ship.
+    this.tractored = false;
     this.harm = {};          // what's hurting the crew right now, by cause (health/s)
     this.crewLost = false;
     // How fast key readings are moving (per second, smoothed) — for the
@@ -110,7 +162,7 @@ export class ShipSystems {
     this._prev = null;
     // Wall-clock stamps of the moments the alarms and viewscreen react to —
     // consumers compare against the last stamp they saw.
-    this.cues = { hit: 0, shieldsDown: 0, breach: 0, scram: 0, restart: 0, crewLost: 0, casualty: 0 };
+    this.cues = { hit: 0, shieldsDown: 0, breach: 0, scram: 0, restart: 0, crewLost: 0, casualty: 0, fault: 0 };
 
     // What the flight sim should be told: how much of its thrust is really
     // there, the highest warp factor the coils will hold, and why warp is
@@ -118,6 +170,12 @@ export class ShipSystems {
     this.impulseFactor = 1;
     this.warpMax = 3;
     this.warpInhibit = null;
+
+    // Repairs under way: { [component or hull section]: { rate (per s), crew, blocked } },
+    // and the one the captain wants first (`repair <x>`), or null.
+    this.repairs = {};
+    this.repairFocus = null;
+    this._damaged = new Set();
 
     this.history = { shields: [], hull: [], heat: [], fuel: [], crew: [], power: [], o2: [], dose: [] };
     this._sampleIn = 0;
@@ -136,13 +194,47 @@ export class ShipSystems {
     return this.settings[system];
   }
   resetPower() { for (const k in this.settings) this.settings[k] = 1; }
+  // Put repair effort on one component or hull section first; null for
+  // the default (everything, worst-damaged weighted most).
+  setRepairFocus(target) {
+    if (target != null && !(target in MAINTENANCE) && !HULL_SECTIONS.includes(target)) return false;
+    this.repairFocus = target;
+    return true;
+  }
 
   // ---------------- derived readouts ----------------
   hullIntegrity() {
     return HULL_SECTIONS.reduce((s, k) => s + this.hull[k], 0) / HULL_SECTIONS.length;
   }
   breached() { return HULL_SECTIONS.filter((k) => this.hull[k] < BREACH_AT); }
+  // How hard a department is working right now, as a multiplier on what
+  // its people learn on watch (crew.js): fighting a problem teaches more
+  // than a quiet watch.
+  strain(dept) {
+    const hurt = (c) => this.health[c] < 0.9;
+    switch (dept) {
+      case "engineering": return this.reactor.scrammed || this.heat > THROTTLE_AT || ["reactor", "radiators", "impulse", "warp"].some(hurt) ? 3 : 1;
+      case "tactical": return (this.shields < 0.5 && this.flux.rad > 0.5) || hurt("emitters") ? 3 : 1;
+      case "operations": return this.atmo.breathable < 0.8 || this.breached().length || hurt("life") ? 3 : 1;
+      case "medical": {
+        const patients = this.roster.crew.filter((m) => m.health > 0 && m.location === "sickbay").length;
+        return 1 + Math.min(2, patients * 0.5);
+      }
+      case "science": return this.noise > 0.3 || hurt("sensors") ? 2 : 1;
+      case "comms": return this.interference > 0.3 || hurt("comms") ? 2 : 1;
+      case "helm": return this.flux.heat + this.flux.rad > 3 ? 2 : 1;
+      case "security": return this.breached().length ? 2 : 1;
+      default: return 1;
+    }
+  }
+
   // How well comms and sensors are working, all things considered.
+  // What the weapons can put out, 0..1.5: their health, the power they're
+  // getting, and the `power weapons` setting. Nothing below WEAPONS_OFFLINE.
+  weaponsFactor() {
+    if (this.health.weapons < WEAPONS_OFFLINE) return 0;
+    return this.health.weapons * Math.min(1, this.power.sat.weapons ?? 1) * Math.min(SETTING_MAX, this.settings.weapons);
+  }
   commsQuality() { return this.health.comms * (this.power.sat.comms ?? 1) * (1 - this.interference) * this.roster.factor("comms"); }
   sensorQuality() { return this.health.sensors * (this.power.sat.sensors ?? 1) * (1 - this.noise) * this.roster.factor("science"); }
 
@@ -160,6 +252,8 @@ export class ShipSystems {
     this._engineStep(dt, env);
     this._signalStep(dt);
     this._exposureStep(dt);
+    this._wearStep(dt, env);
+    this._repairStep(dt);
     this._trendStep(dt);
     this._alertsStep();
     this._sample(dt);
@@ -200,6 +294,7 @@ export class ShipSystems {
     const demand = {
       life: DEMAND.life * s.life,
       shields: DEMAND.shields * s.shields,
+      weapons: DEMAND.weapons * s.weapons * (env.weaponsLoad ?? 0),
       engines: engineBase * Math.min(1, s.engines),
       sensors: DEMAND.sensors * s.sensors,
       comms: DEMAND.comms * s.comms,
@@ -297,6 +392,12 @@ export class ShipSystems {
       if (e.kind === "death") {
         this.cues.casualty = Date.now();
         this.onEvent("deny", `Casualty — ${m.rank} ${m.name}, ${m.role}.`);
+      } else if (e.kind === "level") {
+        this.onEvent("info", `${m.rank} ${m.name} has reached ${levelName(e.level)} in ${skillById[e.skill].label}.`);
+      } else if (e.kind === "watch") {
+        this.onEvent("info", this.roster.allHands
+          ? `${SHIFT_LABEL[e.shift]} watch — all hands remain at stations.`
+          : `${SHIFT_LABEL[e.shift]} watch has the ship.`);
       }
     }
     this.crew = this.roster.crew.reduce((a, m) => a + m.health, 0) / this.roster.total;
@@ -309,10 +410,12 @@ export class ShipSystems {
   }
 
   _engineStep(dt, env) {
-    this.impulseFactor = this.health.impulse * Math.min(1, this.power.sat.engines) * this.roster.factor("helm");
+    this.impulseFactor = this.health.impulse * Math.min(1, this.power.sat.engines) * this.roster.factor("helm") *
+      (this.tractored ? TRACTOR_DRAG : 1);
     const w = this.health.warp;
     this.warpMax = w > 0.7 ? 3 : w > 0.5 ? 2 : w > 0.35 ? 1 : 0;
     this.warpInhibit =
+      this.tractored ? "held by tractor beam" :
       this.reactor.scrammed ? "reactor scrammed" :
       this.warpMax === 0 ? "warp coils damaged" :
       this.fuel < 0.02 ? "fuel exhausted" :
@@ -332,6 +435,117 @@ export class ShipSystems {
       const wear = gap * 0.01 * (1 + this.flux.rad * 0.1) * dt;
       for (const c of SECTION_COMPONENTS[k]) this.health[c] = clamp01(this.health[c] - wear);
     }
+  }
+
+  // Wear and tear. How hard each component is working sets how fast it
+  // wears; its department's staffing, how well routine maintenance keeps
+  // up. Worn components fault (faults.js), and a spreading fault keeps
+  // eating health until the repair crews have contained it (_repairStep).
+  _wearStep(dt, env) {
+    if (!this.wear || this.crewLost) return;
+    const warp = env.mode === "warp";
+    const out = this.reactor.scrammed ? 0 : this.reactor.output / 100;
+    const use = {
+      reactor: 0.3 + out + Math.max(0, out - 1) * 3,
+      radiators: 0.3 + this.heat * 1.2,
+      impulse: warp ? 0.2 : 0.2 + (env.throttle ?? 0),
+      warp: warp ? 0.5 + 0.25 * (env.warpFactor ?? 2) : 0.1,
+      emitters: 0.3 + 0.5 * this.settings.shields + Math.min(1, this.flux.rad * 0.1),
+      life: 0.8,
+      comms: 0.4 + 0.4 * this.settings.comms,
+      sensors: 0.4 + 0.4 * this.settings.sensors,
+      weapons: 0.2 + 0.8 * (env.weaponsLoad ?? 0),
+    };
+    const upkeep = (c) => Math.min(1, this.roster.staffing(MAINTENANCE[c].dept));
+    for (const { c, fault } of this.wear.step(dt, this.time, this.health, use, upkeep)) {
+      const { dept, label } = MAINTENANCE[c];
+      const crew = this.roster.workers([dept], MAINTENANCE[c].skill).length;
+      this._damaged.add(c);
+      this.cues.fault = Date.now();
+      this.onEvent("deny", `Fault — ${label.toLowerCase()}: ${fault.name}.` +
+        (fault.spread ? " Spreading until contained." : "") +
+        (crew ? ` ${DEPARTMENTS[dept].label} responding.` : ` No ${DEPARTMENTS[dept].label.toLowerCase()} crew at their posts.`));
+    }
+    this.wear.spread(dt, this.health);
+  }
+
+  // The crew at work on the damage. Each department splits its effort
+  // over the components it maintains, worst first (and the captain's
+  // focus most); damage control does the same over the hull. Restoring
+  // health is practice in the job's skill, shared among whoever did it.
+  _repairStep(dt) {
+    if (this.crewLost) return;
+    const t = this.time;
+    const repairs = {};
+    const weight = (key, health) => (1 - health) * (this.repairFocus === key ? FOCUS_WEIGHT : 1);
+
+    // Components, by department.
+    const byDept = {};
+    for (const [c, m] of Object.entries(MAINTENANCE)) {
+      if (this.health[c] < 0.999) (byDept[m.dept] ??= []).push(c);
+    }
+    for (const [dept, comps] of Object.entries(byDept)) {
+      const total = comps.reduce((a, c) => a + weight(c, this.health[c]), 0);
+      for (const c of comps) {
+        const { skill } = MAINTENANCE[c];
+        const crew = this.roster.workers([dept], skill);
+        const units = crew.reduce((a, x) => a + x.w, 0) * (weight(c, this.health[c]) / total);
+        const rate = REPAIR_RATE * units * (this.health[c] < REBUILD_AT ? REBUILD_SLOW : 1);
+        const gain = Math.min(1 - this.health[c], rate * dt);
+        this.health[c] += gain;
+        repairs[c] = { rate, crew: crew.length, blocked: crew.length ? null : `no ${DEPARTMENTS[dept].label.toLowerCase()} crew at their posts` };
+        // A spreading fault outruns the repairs until the crew contain it.
+        const spreading = this.wear?.active[c];
+        if (spreading) {
+          repairs[c].fault = spreading.name;
+          repairs[c].containing = Math.min(1, spreading.done / spreading.work);
+          if (this.wear.work(c, units * dt)) this.onEvent("info", `${MAINTENANCE[c].label}: ${spreading.name} — contained.`);
+        } else if (this.wear?.cause[c]) {
+          repairs[c].fault = this.wear.cause[c];
+        }
+        this._repaired(c, MAINTENANCE[c].label);
+        this.roster.credit(crew, skill, gain * XP_PER_REPAIR, t);
+        this.roster.credit(crew, "damage-control", gain * XP_DC_PER_REPAIR, t);
+      }
+    }
+
+    // The hull: patched from inside up to EXPOSED_AT, past that only by
+    // suited crew outside, and only when the radiation outside allows it.
+    const hullDamaged = HULL_SECTIONS.filter((k) => this.hull[k] < 0.999);
+    if (hullDamaged.length) {
+      const crew = this.roster.workers(DAMAGE_CONTROL, "damage-control");
+      const eva = crew.filter(({ m }) => this.roster.levelIn(m, "eva") >= EVA_LEVEL);
+      const evaSafe = this.doseRate * 3600 < EVA_MAX_SVH;
+      const total = hullDamaged.reduce((a, k) => a + weight(k, this.hull[k]), 0);
+      for (const k of hullDamaged) {
+        const share = weight(k, this.hull[k]) / total;
+        const outside = this.hull[k] >= EXPOSED_AT;
+        const party = outside ? (evaSafe ? eva : []) : crew;
+        const blocked =
+          !crew.length ? "no damage control crew at their posts" :
+          outside && !eva.length ? "needs EVA-qualified crew" :
+          outside && !evaSafe ? "too much radiation for EVA" : null;
+        // Patching a section open to space is work in pressure suits.
+        const units = party.reduce((a, x) => a + x.w, 0) * share * (this.hull[k] < BREACH_AT ? 0.5 : 1);
+        const rate = HULL_REPAIR * units;
+        const before = this.hull[k];
+        const gain = Math.min(1 - before, rate * dt);
+        this.hull[k] += gain;
+        repairs[k] = { rate, crew: party.length, blocked };
+        if (before < BREACH_AT && this.hull[k] >= BREACH_AT) this.onEvent("info", `Breach sealed — ${k} section.`);
+        this._repaired(k, `${k[0].toUpperCase()}${k.slice(1)} hull`);
+        this.roster.credit(party, outside ? "eva" : "damage-control", gain * XP_PER_REPAIR, t);
+      }
+    }
+    this.repairs = repairs;
+    if (this.repairFocus && !(this.repairFocus in repairs)) this.repairFocus = null;
+  }
+  // Report a repair finished — for anything that was really damaged.
+  _repaired(key, label) {
+    const v = key in this.health ? this.health[key] : this.hull[key];
+    if (v >= 0.999) this.wear?.overhauled(key);
+    if (v < 0.9) this._damaged.add(key);
+    else if (v >= 0.999 && this._damaged.delete(key)) this.onEvent("info", `Repairs complete — ${label.toLowerCase()} restored.`);
   }
 
   _trendNow() {
@@ -452,9 +666,12 @@ export class ShipSystems {
       dose: this.dose, doseRate: this.doseRate,
       interference: this.interference, noise: this.noise,
       commsQuality: this.commsQuality(), sensorQuality: this.sensorQuality(),
-      flux: { ...this.flux },
-      impulseFactor: this.impulseFactor, warpMax: this.warpMax, warpInhibit: this.warpInhibit,
+      flux: { ...this.flux }, incoming: this.incoming.map((x) => ({ ...x })),
+      impulseFactor: this.impulseFactor, warpMax: this.warpMax, warpInhibit: this.warpInhibit, tractored: this.tractored,
       lastHit: this._lastHit ? { ...this._lastHit } : null,
+      repairs: Object.fromEntries(Object.entries(this.repairs).map(([k, v]) => [k, { ...v }])),
+      repairFocus: this.repairFocus,
+      faults: this.wear?.snapshot() ?? null,
       harm: { ...this.harm }, crewLost: this.crewLost, cues: { ...this.cues },
       history: Object.fromEntries(Object.entries(this.history).map(([k, v]) => [k, v.slice()])),
     };

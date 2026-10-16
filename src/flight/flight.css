@@ -514,3 +514,29 @@
 .pf-event.t-injury .pf-event-text, .pf-event.t-incident .pf-event-text { color: var(--amber, #ff9c33); }
 .pf-event.t-death .pf-event-text { color: var(--red, #ff5544); }
 .pf-event.t-promotion .pf-event-text, .pf-event.t-posting .pf-event-text { color: #6bffc4; }
+
+/* ---- watches, repairs, learning ---------------------------------------------- */
+.fstatus .clock { padding: 2px 12px; background: #000; color: var(--gold, #ffcc33); border-radius: 12px; font-variant-numeric: tabular-nums; }
+.crew-dot.off { fill: none; stroke: #6bffc4; stroke-width: 1; }
+.crew-dot.off.injured { stroke: var(--amber, #ff9c33); }
+.crew-row { grid-template-columns: 8px 1fr 12px 22px 62px 54px; }
+.crew-row-watch { color: #3a4a66; font-size: 0.7rem; text-align: center; }
+.crew-row-watch.on { color: var(--gold, #ffcc33); }
+.crew-row-where.tired { color: var(--amber, #ff9c33); }
+.crew-btn:disabled { opacity: 0.4; cursor: default; }
+.sci-repairs { flex: none; display: flex; flex-direction: column; gap: 2px; padding: 4px 8px 6px; border-radius: 6px; border: 1px solid #1c2740; background: #05070c; max-height: 34%; overflow-y: auto; }
+.sci-repairs.none { font-family: "Oswald", monospace; font-size: 0.62rem; letter-spacing: 0.12em; color: #4f6a8f; text-align: center; }
+.sci-repair { display: grid; grid-template-columns: 112px 1fr 36px 150px; gap: 8px; align-items: center; font-family: "Oswald", sans-serif; font-size: 0.68rem; cursor: pointer; padding: 1px 4px; border-radius: 4px; }
+.sci-repair:hover { background: #0e1626; }
+.sci-repair.focus { background: #1a1405; color: var(--gold, #ffcc33); }
+.sci-repair-v { text-align: right; font-variant-numeric: tabular-nums; }
+.sci-repair-eta { color: #6f86a8; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sci-repair-eta.blocked { color: var(--amber, #ff9c33); }
+.sci-repair-name { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
+.sci-repair-fault { font-family: "Inter", sans-serif; font-size: 0.56rem; color: #b08a5a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sci-repair-fault.spreading { color: var(--red, #ff5544); animation: sci-fault-pulse 1.2s ease-in-out infinite; }
+@keyframes sci-fault-pulse { 50% { opacity: 0.55; } }
+.pf-gain { color: #6bffc4; font-size: 0.85em; }
+
+/* ---- weapons ------------------------------------------------------------------ */
+.sci-comp .sci-phaser { fill: none !important; stroke-width: 5; stroke-linecap: round; }

@@ -53,7 +53,10 @@ export default function Comms() {
   // poll. The profile is a pure function of the object, so this is stable.
   const profile = useMemo(() => (obj ? signalProfile(obj) : null), [obj?.id]);
   const listeningToThis = obj && listening?.id === obj.id;
-  const interpretation = obj && profile ? interpretSignal(obj, profile) : null;
+  // A body broadcasting a song (universe.json `song`, played by anthem.js)
+  // says so instead of reading out its natural signal.
+  const interpretation = obj?.song ? "Repeating melodic structure on every band. Something here is broadcasting a song."
+    : obj && profile ? interpretSignal(obj, profile) : null;
   const anomalous = obj && profile && isArtificial(obj, profile);
   const dominant = profile?.bands.reduce((a, b) => (b.amplitude > a.amplitude ? b : a)) ?? null;
 
@@ -147,7 +150,7 @@ export default function Comms() {
             <div className="comms-interpretation">▸ {interpretation}</div>
 
             <div className="comms-note">
-              Signal character: {profile.character}
+              Signal character: {obj.song ? "music" : profile.character}
               {profile.pulseHz ? ` · ${profile.pulseHz.toFixed(2)} Hz pulse` : ""}
             </div>
             {listening && !listeningToThis && (

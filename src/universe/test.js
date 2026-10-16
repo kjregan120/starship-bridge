@@ -6,9 +6,15 @@ import { dirname, join } from "node:path";
 import { positionAt, gravityOnShip, magnitude } from "./physics.js";
 import { ShipSystems, sectionFacing } from "./ship.js";
 import { AlertBoard, assessThreats } from "./alerts.js";
-import { newCareer, crewProfiles, startMission, checkpoint, reassign } from "./personnel/career.js";
-import { ageOn, skillLevel, qualifiedDepts } from "./personnel/profile.js";
+import { newCareer, crewProfiles, startMission, checkpoint, reassign, crossTrain, finalizeMission } from "./personnel/career.js";
+import { ageOn, skillLevel, qualifiedDepts, CORE_SKILL } from "./personnel/profile.js";
 import { migrateCareer } from "./personnel/schema.js";
+import { parseMagnify, clampZoom, MAX_ZOOM } from "../flight/lens.js";
+import { cmeStep, cmeEta, cmeEnergy, cmeEffects, frontReach } from "./cme.js";
+import { Cube, mulberry32, HOLD, DETECT, WEAPON_RANGE, TRACTOR_RANGE, LOSE } from "./cube.js";
+import { Collective, collectiveSystems, HOME_SPACE, ROAM_COOLDOWN } from "./collective.js";
+import { Tactical, HOLD_WINDOW } from "./tactical.js";
+import { MAINTENANCE } from "./ship.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const universe = JSON.parse(readFileSync(join(here, "universe.json"), "utf8"));
@@ -262,7 +268,7 @@ console.log("\n10. Personnel files and the career");
 
   // Reassignment needs the skill, and changes who staffs what.
   const s2 = new ShipSystems({ profiles: m2.crew, day: c.day });
-  const crossTrained = m2.crew.find((p) => qualifiedDepts(p).some((d) => d === "engineering" && p.post.dept !== "engineering"));
+  const crossTrained = m2.crew.find((p) => p.post.shift === "alpha" && qualifiedDepts(p).some((d) => d === "engineering" && p.post.dept !== "engineering"));
   if (crossTrained) {
     const before = s2.roster.staffing("engineering");
     reassign(c, crossTrained.id, "engineering");
@@ -272,6 +278,523 @@ console.log("\n10. Personnel files and the career");
   } else {
     check(`a cross-trained crew member can cover Engineering`, false, "no one cross-trained in this seed");
   }
+}
+
+console.log("\n11. Watches, learning by doing, and repairs");
+{
+  const quiet = { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } };
+  const run = (ship, secs, env = quiet) => { for (let t = 0; t < secs; t += 0.1) ship.step(0.1, env); };
+
+  // Watches: a third of the crew at their posts, changing over on the clock.
+  const w = new ShipSystems({ seed: 8, hour: 15.5 });
+  const onAt = (ship) => ship.roster.crew.filter((m) => m.location === "station");
+  check(`at 1530 only alpha watch is at their posts, the rest in quarters`,
+    onAt(w).every((m) => m.shift === "alpha") && w.roster.crew.filter((m) => m.location === "quarters").length > 20, `${onAt(w).length} on watch`);
+  const snap = JSON.parse(JSON.stringify(w.snapshot()));
+  check(`the snapshot for the UI carries watches and the clock`, snap.roster.shift === "alpha" && snap.roster.clock.hour === 15.5 &&
+    snap.roster.crew.every((m) => typeof m.onWatch === "boolean" && m.skill >= 0 && !m.profile) && snap.repairs != null);
+  check(`a full watch staffs every department`, ["engineering", "tactical", "operations", "helm"].every((d) => w.roster.staffing(d) > 0.7));
+  let said = [];
+  w.onEvent = (k, msg) => said.push(msg);
+  run(w, 40); // 40 ship minutes
+  check(`at 1600 beta watch takes over`, onAt(w).every((m) => m.shift === "beta") && said.some((x) => /Beta watch has the ship/.test(x)), `${onAt(w).length} on watch`);
+
+  // All hands: everyone at their post, and they tire.
+  const ah = new ShipSystems({ seed: 8, hour: 9 });
+  const before = onAt(ah).length;
+  ah.roster.callAllHands();
+  check(`call all hands brings the off watch to their stations`, onAt(ah).length > 2 * before, `${before} → ${onAt(ah).length}`);
+  run(ah, 18 * 60); // 18 ship hours, to 0300
+  const tired = ah.roster.stationFatigue();
+  check(`...and the alert board says to stand down`, assessThreats(ah).some((t) => t.action === "stand down"), `fatigue ${tired.toFixed(2)}`);
+  ah.roster.standDown();
+  const fresh = new ShipSystems({ seed: 8, hour: 3 });
+  check(`a crew kept at stations pays for it: the watch left on duty is worn out`,
+    ah.roster.staffing("engineering") < 0.85 * fresh.roster.staffing("engineering"),
+    `engineering ${ah.roster.staffing("engineering").toFixed(2)} vs ${fresh.roster.staffing("engineering").toFixed(2)} rested`);
+  check(`stand down sends the off watch to quarters to rest`, onAt(ah).every((m) => ah.roster.onWatch(m)) && ah.roster.crew.some((m) => m.location === "quarters"));
+  const r0 = ah.roster.crew.find((m) => m.location === "quarters").fatigue;
+  run(ah, 4 * 60);
+  check(`...where they recover`, ah.roster.crew.filter((m) => m.location === "quarters").every((m) => m.fatigue < r0));
+
+  // Shelter takes everyone, and an evacuated section stays clear through a watch change.
+  const sh = new ShipSystems({ seed: 8, hour: 7.8 });
+  sh.roster.shelterSection("port");
+  run(sh, 30);
+  check(`an evacuated section stays clear across a watch change`, !sh.roster.crew.some((m) => m.health > 0 && m.location !== "shelter" && sh.roster.whereIs(m) === "port"));
+  sh.roster.shelterAll();
+  check(`all hands to shelter takes the off watch too`, sh.roster.crew.every((m) => m.location === "shelter" || m.location === "sickbay"));
+  sh.roster.resumeStations();
+  check(`resume stations sends people back to posts and quarters`, onAt(sh).length > 5 && sh.roster.crew.some((m) => m.location === "quarters"));
+
+  // Learning by doing: watches teach, and teach more under strain.
+  const calm = new ShipSystems({ seed: 9, hour: 9 }), hot = new ShipSystems({ seed: 9, hour: 9 });
+  hot.heat = 0.8;
+  check(`a reactor running hot is a department under strain`, hot.strain("engineering") === 3 && calm.strain("engineering") === 1);
+  hot.strain = (d) => (d === "engineering" ? 3 : 1); // hold it there for the comparison
+  run(calm, 6 * 60); run(hot, 6 * 60);
+  const engXp = (ship) => ship.roster.crew.filter((m) => m.homeDept === "engineering" && m.location === "station")
+    .reduce((a, m) => a + (m.xp["reactor-ops"] ?? 0), 0);
+  check(`hours on watch are practice in their duties`, engXp(calm) > 0, `${engXp(calm).toFixed(1)} xp`);
+  check(`...and fighting a problem teaches faster`, engXp(hot) > 2 * engXp(calm), `${engXp(hot).toFixed(1)} vs ${engXp(calm).toFixed(1)}`);
+
+  // Repairs: the watch fixes things, all hands faster, the focus first.
+  const dmg = (allHands) => {
+    const ship = new ShipSystems({ seed: 10, hour: 9 });
+    if (allHands) ship.roster.callAllHands();
+    ship.health.reactor = 0.4; ship.health.radiators = 0.4;
+    run(ship, 120);
+    return ship;
+  };
+  const watch = dmg(false), all = dmg(true);
+  check(`the watch repairs damaged components`, watch.health.reactor > 0.5, `reactor 0.40 → ${watch.health.reactor.toFixed(2)}`);
+  check(`all hands repairs faster`, all.health.reactor - 0.4 > 1.8 * (watch.health.reactor - 0.4), `${all.health.reactor.toFixed(2)} vs ${watch.health.reactor.toFixed(2)}`);
+  check(`repair work is practice for whoever did it`, all.roster.crew.some((m) => (m.xp["damage-control"] ?? 0) > 0));
+  const foc = new ShipSystems({ seed: 10, hour: 9 });
+  foc.health.reactor = 0.4; foc.health.radiators = 0.4;
+  foc.setRepairFocus("radiators");
+  run(foc, 120);
+  check(`repair <x> puts the crews on it first`, foc.health.radiators - 0.4 > 1.5 * (foc.health.reactor - 0.4), `radiators ${foc.health.radiators.toFixed(2)}, reactor ${foc.health.reactor.toFixed(2)}`);
+  const br = new ShipSystems({ seed: 10, hour: 9 });
+  br.hull.fore = 0.2;
+  br.roster.callAllHands(br.breached()); // nobody goes to a post that's open to space
+  const keptOut = br.roster.crew.filter((m) => m.homeDept === "science" && m.location === "shelter").length;
+  said = [];
+  br.onEvent = (k, msg) => said.push(msg);
+  run(br, 200);
+  check(`damage control seals a breach`, br.hull.fore >= 0.3 && said.some((x) => /Breach sealed — fore/.test(x)), `fore ${br.hull.fore.toFixed(2)}`);
+  check(`once it's sealed, the crew kept out of that section go back to work`,
+    keptOut === 5 && !br.roster.crew.some((m) => m.health > 0 && m.homeDept === "science" && m.location === "shelter") &&
+    br.roster.staffing("science") > 0.7, `${keptOut} kept out; science ${br.roster.staffing("science").toFixed(2)} after`);
+  const evaShip = new ShipSystems({ seed: 10, hour: 9 });
+  evaShip.hull.aft = 0.6;
+  run(evaShip, 5, { ...quiet, flux: { heat: 0, rad: 20 } });
+  check(`hull work outside waits for the radiation to drop`, evaShip.repairs.aft.rate === 0 && /radiation|EVA/.test(evaShip.repairs.aft.blocked ?? ""), evaShip.repairs.aft.blocked);
+
+  // The career: routine between missions, practice on file, cross-training.
+  const c = newCareer(77);
+  startMission(c);
+  const p0 = crewProfiles(c)[5];
+  const xp0 = Object.values(p0.skills).reduce((a, x) => a + x.xp, 0);
+  const sh2 = new ShipSystems({ profiles: crewProfiles(c), day: c.day, hour: c.hour });
+  const m0 = sh2.roster.find(p0.id);
+  m0.xp["damage-control"] = 40.6;
+  checkpoint(c, sh2.roster);
+  finalizeMission(c);
+  check(`a mission's practice goes on file`, p0.timeline.some((e) => e.type === "practice" && /^Mission 1/.test(e.text) && e.data.xp["damage-control"] === 40));
+  const target = Object.keys(CORE_SKILL).find((d) => d !== p0.post.dept && d !== "command" && skillLevel(p0, CORE_SKILL[d]) < 2);
+  crossTrain(c, p0.id, target);
+  const tXp = p0.skills[CORE_SKILL[target]]?.xp ?? 0;
+  const hour0 = c.hour;
+  startMission(c, () => 0.99); // ten days between missions
+  const xp1 = Object.values(p0.skills).reduce((a, x) => a + x.xp, 0);
+  check(`the days between missions are practice too`, xp1 > xp0 && p0.timeline.some((e) => e.type === "practice" && /^Routine duties/.test(e.text)), `+${xp1 - xp0} xp`);
+  check(`cross-training goes to the chosen department's skill`, (p0.skills[CORE_SKILL[target]]?.xp ?? 0) > tXp && p0.post.crossTrain === CORE_SKILL[target], `${target}`);
+  check(`a mission can start on any watch`, c.hour !== hour0 && c.hour >= 0 && c.hour < 24, `${c.hour}`);
+
+  // Saves from before watches existed load, and get them.
+  const old = JSON.parse(JSON.stringify(newCareer(5)));
+  old.version = 1; delete old.hour;
+  for (const p of Object.values(old.profiles)) { p.schemaVersion = 1; delete p.post.shift; delete p.post.crossTrain; }
+  migrateCareer(old);
+  check(`a pre-watch save migrates: everyone gets their post's watch`, old.hour === 8 &&
+    Object.values(old.profiles).every((p) => ["alpha", "beta", "gamma"].includes(p.post.shift) && p.schemaVersion === 3));
+
+  // Saves from before the ship had weapons: tactical crew get trained on them.
+  const preWeapons = JSON.parse(JSON.stringify(newCareer(5)));
+  for (const p of Object.values(preWeapons.profiles)) { p.schemaVersion = 2; delete p.skills.weapons; }
+  migrateCareer(preWeapons);
+  const tac = Object.values(preWeapons.profiles).filter((p) => p.post.dept === "tactical");
+  check(`a pre-weapons save migrates: tactical crew can use the weapons, nobody else gains them`,
+    tac.length > 0 && tac.every((p) => skillLevel(p, "weapons") >= 1) &&
+    Object.values(preWeapons.profiles).filter((p) => p.post.dept !== "tactical").every((p) => !p.skills.weapons),
+    tac.map((p) => skillLevel(p, "weapons")).join(","));
+}
+
+console.log("\n12. Hand-placed bodies");
+{
+  const rose = objects.find((o) => o.name === "Isla");
+  const parent = rose && byId[rose.parent];
+  check(`Altair 70 has its pink moon, Isla`, rose?.type === "moon" && rose.color === "#ff4fa8" && parent?.name === "Altair 70 V");
+  const siblings = objects.filter((o) => o.parent === rose?.parent && o.id !== rose.id);
+  check(`...in a clear orbit, outside its planet`, rose.orbit.radius > parent.size * 2 &&
+    siblings.every((o) => Math.abs(o.orbit.radius - rose.orbit.radius) > 1), `r ${rose.orbit.radius}, planet size ${parent.size.toFixed(2)}`);
+}
+
+{
+  const lava = objects.find((o) => o.name === "Graham");
+  const planet = lava && byId[lava.parent];
+  check(`Solace Major 37 has its lava moon, Graham, with volcanoes and a song`, lava?.kind === "lava" && lava.volcanoes === 2 &&
+    lava.song === "waltz" && planet?.name === "Solace Major 37 I");
+  check(`...in a clear orbit, outside its planet`, lava.orbit.radius > planet.size * 2 &&
+    objects.filter((o) => o.parent === lava.parent && o.id !== lava.id).every((o) => Math.abs(o.orbit.radius - lava.orbit.radius) > 1));
+}
+
+console.log("\n13. Wear and tear");
+{
+  const quiet = { mode: "impulse", throttle: 0.3, flux: { heat: 0, rad: 0 } };
+  const run = (ship, secs, env = quiet) => { for (let t = 0; t < secs; t += 0.1) ship.step(0.1, env); };
+  const rng = (seed) => () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+
+  const off = new ShipSystems({ seed: 11, hour: 9 });
+  run(off, 600);
+  check(`without faults on, nothing breaks by itself`, off.wear === null && Object.values(off.health).every((v) => v === 1));
+
+  // Half an hour of ordinary flying: things break, and the crews fix them.
+  const said = [];
+  const on = new ShipSystems({ seed: 11, hour: 9, faults: true, random: rng(3), onEvent: (k, m) => said.push(m) });
+  run(on, 1800);
+  const faults = said.filter((m) => /^Fault — /.test(m));
+  check(`with faults on, systems fault now and then`, faults.length >= 3 && faults.length <= 20, `${faults.length} in 30 min: ${faults.slice(0, 3).join(" | ")}`);
+  check(`...and the watch crews repair them`, said.some((m) => /Repairs complete|contained/.test(m)) &&
+    Object.values(on.health).filter((v) => v < 0.5).length <= 1, Object.entries(on.health).map(([k, v]) => `${k} ${v.toFixed(2)}`).join(", "));
+
+  // A spreading fault: contained by the crew, then repaired, then the wear starts again.
+  const leak = (setup) => {
+    const ship = new ShipSystems({ seed: 12, hour: 9, faults: true, random: () => 0.99 });
+    setup?.(ship);
+    ship.health.reactor = 0.8;
+    ship.wear.cause.reactor = "coolant pump seized";
+    ship.wear.active.reactor = { name: "coolant pump seized", spread: 0.004, work: 40, done: 0, at: 0 };
+    return ship;
+  };
+  const fixed = leak();
+  check(`a spreading fault goes on the alert list, with the order to fix it`,
+    assessThreats(fixed).some((t) => t.id === "fault-reactor" && t.action === "repair reactor"));
+  fixed.roster.callAllHands();
+  const log = [];
+  let wearAtRepair = null;
+  fixed.onEvent = (k, m) => { log.push(m); if (/Repairs complete — reactor/.test(m)) wearAtRepair = fixed.wear.wear.reactor; };
+  run(fixed, 900);
+  check(`...the crew contain it, repair it, and its wear starts over`, log.some((m) => /coolant pump seized — contained/.test(m)) &&
+    !fixed.wear.active.reactor && fixed.health.reactor >= 0.999 && wearAtRepair === 0 && !fixed.wear.cause.reactor,
+    `reactor ${fixed.health.reactor.toFixed(3)}, wear at repair ${wearAtRepair}`);
+  const alone = leak((ship) => ship.roster.shelterAll());
+  run(alone, 120);
+  const t2 = assessThreats(alone).find((t) => t.id === "fault-reactor");
+  check(`with nobody at their posts it keeps spreading, and goes red`, alone.health.reactor < 0.4 && alone.wear.active.reactor &&
+    t2?.level === "red", `reactor ${alone.health.reactor.toFixed(2)}, ${t2?.level} — ${t2?.detail}`);
+
+  // Short-handed departments keep up with less maintenance.
+  const full = new ShipSystems({ seed: 13, hour: 9, faults: true, random: () => 0.99 });
+  const thin = new ShipSystems({ seed: 13, hour: 9, faults: true, random: () => 0.99 });
+  thin.roster.shelterAll();
+  const w0 = full.wear.wear.comms;
+  run(full, 300); run(thin, 300);
+  check(`an unmanned department's systems wear faster`, thin.wear.wear.comms - w0 > 1.3 * (full.wear.wear.comms - w0),
+    `${(thin.wear.wear.comms - w0).toFixed(3)} vs ${(full.wear.wear.comms - w0).toFixed(3)}`);
+}
+
+console.log("\n14. The magnify order");
+{
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const cases = [
+    ["", {}], ["off", { reset: true }], ["reset", { reset: true }],
+    ["in", { step: 2 }], ["out", { step: 0.5 }],
+    ["4", { zoom: 4 }], ["x4", { zoom: 4 }], ["4x", { zoom: 4 }], ["2.5", { zoom: 2.5 }], ["400%", { zoom: 4 }],
+    ["ahead", { ahead: true }],
+    ["Erebus", { target: "Erebus" }], ["on Erebus", { target: "Erebus" }], ["at Altair 70", { target: "Altair 70" }],
+    ["6 on Erebus", { zoom: 6, target: "Erebus" }], ["x6 Erebus", { zoom: 6, target: "Erebus" }],
+    ["4 xeno", { zoom: 4, target: "xeno" }], ["4x xeno", { zoom: 4, target: "xeno" }],
+    ["on", { error: "on" }],
+  ];
+  for (const [rest, want] of cases)
+    check(`magnify "${rest}" → ${JSON.stringify(want)}`, same(parseMagnify(rest), want), JSON.stringify(parseMagnify(rest)));
+  check(`zoom is clamped to 1–${MAX_ZOOM}`, clampZoom(0.2) === 1 && clampZoom(50) === MAX_ZOOM && clampZoom(3) === 3);
+}
+
+console.log("\n15. Coronal mass ejections hit the ship");
+{
+  // A cloud launched along +x from the origin; play it forward a tick at a time.
+  const cloud = (o = {}) => ({ at: [0, 0, 0], d: [1, 0, 0], t0: 0, speed: 4, cone: 0.45, radius: 2, ...o });
+  const play = (c, pos, until = 120, dt = 0.05) => {
+    const hits = [];
+    let firstEta = null;
+    for (let t = 0; t < until; t += dt) {
+      const s = cmeStep(c, typeof pos === "function" ? pos(t) : pos, t);
+      if (firstEta == null && s.eta != null) firstEta = s.eta;
+      if (s.hit) hits.push({ t, ...s });
+    }
+    return { hits, firstEta };
+  };
+  const onAxis = play(cloud(), [20, 0, 0]);
+  check("a front reaching the ship hits it exactly once", onAxis.hits.length === 1, `${onAxis.hits.length} hits`);
+  const h = onAxis.hits[0];
+  check("the predicted ETA matches when it lands", h && Math.abs(onAxis.firstEta - h.t) < 0.2,
+    `eta ${onAxis.firstEta?.toFixed(1)}s, landed ${h?.t.toFixed(1)}s`);
+  check("the blow comes from the star's side", h && h.from[0] < -0.99, h && h.from.map((x) => x.toFixed(2)).join(","));
+  check("outside the cone, nothing", play(cloud(), [0, 20, 0]).hits.length === 0);
+  check("beyond where it gets before it fades, nothing",
+    play(cloud(), [2000, 0, 0]).hits.length === 0 && cmeEta(cloud(), [2000, 0, 0], 0) == null);
+  check("entering the cloud behind its front does nothing",
+    play(cloud(), (t) => (t < 30 ? [0, 30, 0] : [20, 0, 0])).hits.length === 0);
+  check("a faster cloud hits harder", cmeEnergy(cloud({ speed: 7 }), 12, 0) > 2.5 * cmeEnergy(cloud(), 12, 0));
+  check("further out it's weaker", cmeEnergy(cloud(), 60, 0) < 0.15 * cmeEnergy(cloud(), 12, 0));
+  check("the flanks are weaker than the nose", cmeEnergy(cloud(), 12, 0.9) < cmeEnergy(cloud(), 12, 0));
+  check("the front accelerates, then coasts",
+    frontReach(1, 4) < 0.5 * 4 && Math.abs(frontReach(61, 4) - frontReach(60, 4) - 0.95 * 4) < 0.01);
+
+  // Through ship.hit(): an ordinary one at 12u is soaked by full shields;
+  // a giant one on half shields gets through, damages the hull and doses the crew.
+  const ordinary = new ShipSystems({ seed: 7 });
+  const r1 = ordinary.hit({ ...cmeEffects(cmeEnergy(cloud({ speed: 3.75 }), 12, 0)), from: [-1, 0, 0], facing: [1, 0, 0] });
+  check("an ordinary eruption at 12u: full shields hold", r1.through === 0 && ordinary.shields < 1, `shields ${ordinary.shields.toFixed(2)}`);
+  const giant = new ShipSystems({ seed: 7 });
+  giant.shields = 0.5;
+  const dose = () => giant.roster.alive().reduce((a, m) => a + m.dose, 0);
+  const dose0 = dose();
+  const r2 = giant.hit({ ...cmeEffects(cmeEnergy(cloud({ speed: 7.5, cone: 0.3 }), 12, 0)), from: [-1, 0, 0], facing: [1, 0, 0] });
+  check("a giant one on half shields gets through to the hull", r2.through > 0 && giant.hull.aft < 1, `aft hull ${giant.hull.aft.toFixed(2)}`);
+  check("...doses the crew", dose() > dose0);
+  check("...and fills comms with static", giant.interference > 0.3, giant.interference.toFixed(2));
+
+  const warned = new ShipSystems({ seed: 7 });
+  warned.shields = 0.2;
+  warned.incoming = [{ kind: "cme", source: "Testar", eta: 42, energy: 0.6 }];
+  const t = assessThreats(warned).find((x) => x.id === "cme");
+  check("an inbound CME is a red alert, with an ETA, when shields won't hold",
+    t && t.level === "red" && t.eta === 42 && t.action === "power shields 150", t && `${t.level} · ${t.action}`);
+}
+
+console.log("\n16. A Collective cube");
+{
+  const cube = (o = {}) => new Cube({ pos: [0, 0, 0], post: [0, 0, 0], seed: 3, random: mulberry32(9), ...o });
+  const c = cube();
+  const roles = {};
+  for (const b of c.blocks) roles[b.role] = (roles[b.role] ?? 0) + 1;
+  check("160 blocks: a 152-block shell and an 8-block core", c.blocks.length === 160 && roles.core === 8, JSON.stringify(roles));
+  check("every face has 4 emitters, a tractor node and a regen node",
+    ["px", "nx", "py", "ny", "pz", "nz"].every((f) => c.live(f, "emitter").length === 4 && c.live(f, "tractor").length === 1 && c.live(f, "regen").length === 1));
+  check("the same seed builds the same cube", JSON.stringify(cube().blocks.map((b) => b.role)) === JSON.stringify(c.blocks.map((b) => b.role)));
+
+  // Run a cube against a ship sitting still at `at`, collecting events.
+  const run = (cb, at, secs, ship = {}) => {
+    const ev = [];
+    for (let t = 0; t < secs; t += 0.1) ev.push(...cb.step(0.1, { pos: at, facing: [0, 0, 1], mode: "impulse", ...ship }));
+    return ev;
+  };
+  const guard = cube();
+  check("a guard sleeps while you're beyond detection range", run(guard, [DETECT + 10, 0, 0], 20).length === 0 && guard.mode === "dormant");
+  const ev = run(guard, [DETECT - 5, 0, 0], 60);
+  check("...wakes, and hails once, when you come in range", ev.filter((e) => e.type === "hail").length === 1);
+  const d = Math.hypot(...guard.pos.map((x, i) => x - [DETECT - 5, 0, 0][i]));
+  check("...closes to holding range (just above you)", Math.abs(d - HOLD) < 0.3, `${d.toFixed(2)}u`);
+  const shots = ev.filter((e) => e.type === "fire");
+  check("...and cuts at you once in weapons range", shots.length > 3, `${shots.length} shots`);
+  check("its beams come from its side of the ship", shots.every((s) => s.from[0] < -0.5));
+  check("...and it locks a tractor beam on at close range", ev.some((e) => e.type === "tractor" && e.on) && guard.tractor);
+
+  // Its whole battery through the ship: shields go, then the hull facing it.
+  const s = new ShipSystems({ seed: 7 });
+  const g2 = cube({ pos: [-HOLD, 0, 0], post: null });
+  for (let t = 0; t < 150; t += 0.1) {
+    for (const e of g2.step(0.1, { pos: [0, 0, 0], facing: [0, 0, 1], mode: "impulse" }))
+      if (e.type === "fire") s.hit({ energy: e.energy, from: e.from, facing: [0, 0, 1] });
+    s.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } });
+  }
+  check("150 s under its guns: shields down, and only the hull facing it damaged", s.shields < 0.3 && s.hull.starboard < 0.9 && s.hull.port === 1,
+    `shields ${s.shields.toFixed(2)}, port hull ${s.hull.port.toFixed(2)}, starboard ${s.hull.starboard.toFixed(2)}`);
+
+  // The tractor: no warp, impulse dragged; overdrive at full impulse breaks free.
+  const held = new ShipSystems({ seed: 7 });
+  held.tractored = true;
+  held.step(0.1, { mode: "impulse", throttle: 1, flux: { heat: 0, rad: 0 } });
+  check("held in a tractor beam: warp off-line, impulse dragged", held.warpInhibit === "held by tractor beam" && held.impulseFactor < 0.2,
+    `${held.warpInhibit} · impulse ${held.impulseFactor.toFixed(2)}`);
+  const t3 = cube({ pos: [-HOLD, 0, 0], post: null });
+  run(t3, [0, 0, 0], 3);
+  const freeEv = run(t3, [0, 0, 0], 10, { straining: true });
+  check("straining against it tears the ship free", freeEv.some((e) => e.type === "tractor" && !e.on && e.why === "broke free"));
+  const relock = run(t3, [0, 0, 0], 10);
+  check("...and it can't lock on again straight away", !relock.some((e) => e.type === "tractor" && e.on));
+  const nodes = cube({ pos: [-HOLD, 0, 0], post: null });
+  for (const b of nodes.blocks) if (b.role === "tractor") b.hp = 0;
+  check("with its tractor nodes destroyed it can't hold you", !run(nodes, [0, 0, 0], 20).some((e) => e.type === "tractor" && e.on));
+
+  // Damage, regeneration, and the core.
+  const dmg = cube();
+  for (let i = 0; i < 40; i++) dmg.damage("px", 0.5);
+  check("enough damage to a face breaches it", dmg.integrity("px") < 0.4, dmg.integrity("px").toFixed(2));
+  check("the core is only hit through a breached face", cube().blocks.filter((b) => b.role === "core").every((b) => b.hp === 1) &&
+    dmg.blocks.some((b) => b.role === "core" && b.hp < 1));
+  const regen = cube();
+  const near = regen.blocks.find((b) => b.role === "plate" && regen.blocks.some((r) => r.role === "regen" && Math.max(...r.cell.map((x, i) => Math.abs(x - b.cell[i]))) <= 1));
+  near.hp = 0.5;
+  run(regen, [DETECT + 10, 0, 0], 30);
+  check("a regen node regrows damaged blocks near it", near.hp > 0.55, near.hp.toFixed(2));
+  const far = cube({ pos: [0, 0, 0], post: null });
+  const lostEv = run(far, [LOSE + 5, 0, 0], 1);
+  check("beyond range it loses you", lostEv.some((e) => e.type === "lost") && far.mode === "lost");
+
+  // Where they come from.
+  const posOf = (o) => positionAt(o, byId, 0);
+  const stars = objects.filter((o) => o.type === "star");
+  const home = stars[0];
+  const held3 = collectiveSystems(stars, home, posOf);
+  check("three Collective systems, all far from home, always the same three",
+    held3.length === 3 && held3.every((s) => dist(posOf(s), posOf(home)) > 400) &&
+    JSON.stringify(collectiveSystems(stars, home, posOf).map((s) => s.id)) === JSON.stringify(held3.map((s) => s.id)),
+    held3.map((s) => s.name).join(", "));
+  const col = new Collective({ stars, home, posOf, random: mulberry32(4) });
+  const atHeld = posOf(held3[0]);
+  const spawnEv = col.step(0.1, { pos: [atHeld[0] + 100, atHeld[1], atHeld[2]], mode: "impulse" });
+  check("coming near a Collective system brings out its guard", spawnEv.some((e) => e.type === "spawn" && !e.roaming) && col.cube?.mode === "dormant");
+
+  // Roamers: never in home space, never at warp, and a cooldown after each.
+  const roamAt = (pos, mode, secs) => {
+    const r = new Collective({ stars, home, posOf, random: mulberry32(11) });
+    let n = 0;
+    for (let t = 0; t < secs; t += 1) for (const e of r.step(1, { pos, mode })) if (e.type === "spawn" && e.roaming) n++;
+    return { n, r };
+  };
+  const hp = posOf(home);
+  // Somewhere outside home space and far from every Collective system.
+  const away = [hp[0] + HOME_SPACE + 50, hp[1], hp[2]];
+  check("no roamer in home space, however long", roamAt(hp, "impulse", 20000).n === 0);
+  check("no roamer while at warp", roamAt(away, "warp", 20000).n === 0);
+  const { n, r } = roamAt(away, "impulse", 20000);
+  check("outside home space, the odd roamer turns up", n >= 1, `${n} in ~5.5 h`);
+  r.cube && (r.cube.mode = "lost");
+  r.step(1, { pos: away, mode: "impulse" });
+  let again = false;
+  for (let t = 0; t < ROAM_COOLDOWN - 5; t += 1) if (r.step(1, { pos: [1e6, 0, 0], mode: "impulse" }).some((e) => e.type === "spawn")) again = true;
+  check("...and none for a while after one breaks off", !again);
+
+  // The alerts.
+  const a = new ShipSystems({ seed: 7 });
+  a.incoming = [{ kind: "cube", name: "Collective cube", dist: 40, eta: 15, tractor: false, strain: 0 }];
+  a.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } });
+  const ct = assessThreats(a).find((x) => x.id === "cube");
+  check("a closing cube is a red alert with time to weapons range, and the advice to warp out",
+    ct && ct.level === "red" && ct.eta === 15 && ct.action === "warp 3", ct && `${ct.title} · ${ct.action}`);
+  a.tractored = true;
+  a.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } });
+  const tt = assessThreats(a).find((x) => x.id === "tractor");
+  check("held: the tractor alert says how to break free", tt && tt.action === "reactor 120", tt && tt.action);
+}
+
+console.log("\n17. Fighting back: weapons and the Tactical crew");
+{
+  // A stationary ship against a fresh cube 5u off its stern. `gunners`:
+  // "watch" (as it comes), "all" (all hands), or "none" (Tactical kept off
+  // their stations). `each(t, ship, cube, tac)` runs every tick, for orders.
+  const fight = ({ gunners = "watch", secs = 60, seed = 11, each = null, cube = null } = {}) => {
+    const ship = new ShipSystems({ seed, random: mulberry32(seed) });
+    if (gunners === "all") ship.roster.callAllHands();
+    const c = cube ?? new Cube({ pos: [0, 1.2, -5], seed: 3, random: mulberry32(seed + 1) });
+    const tac = new Tactical({ random: mulberry32(seed + 2) });
+    const pos = [0, 0, 0], facing = [0, 0, 1], said = [], states = [];
+    let disabledAt = null, t = 0;
+    for (; t < secs && disabledAt == null && !ship.crewLost; t += 0.1) {
+      for (const e of c.step(0.1, { pos, facing, mode: "impulse" })) {
+        if (e.type === "fire") ship.hit({ energy: e.energy, from: e.from, facing });
+        if (e.type === "tractor") ship.tractored = e.on;
+        if (e.type === "disabled") disabledAt = t;
+      }
+      if (gunners === "none") for (const m of ship.roster.crew) if (m.dept === "tactical") m.location = "quarters";
+      each?.(t, ship, c, tac);
+      for (const e of tac.step(0.1, { cube: c, ship, shipPos: pos })) said.push(e.text);
+      states.push(tac.state);
+      ship.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 }, weaponsLoad: tac.load });
+    }
+    const hp = c.blocks.reduce((a, b) => a + b.hp, 0) / c.blocks.length;
+    return { ship, cube: c, tac, said, states, disabledAt, hp, t };
+  };
+
+  // The hold window.
+  const quiet = fight({ secs: HOLD_WINDOW - 1 });
+  check("a cube in range: Tactical report ready and hold for orders", quiet.tac.state === "hold" &&
+    quiet.said.some((s) => /awaiting your orders/.test(s)) && quiet.hp === 1);
+  const free = fight({ secs: 30 });
+  check(`no order in ${HOLD_WINDOW} s: they engage on their own, and hit it`, free.said.some((s) => /no orders\. Engaging/i.test(s)) &&
+    free.tac.state === "engaged" && free.hp < 1, `cube at ${(free.hp * 100).toFixed(0)}%`);
+  const held = fight({ secs: 30, each: (t, s, c, tac) => { if (Math.abs(t - 2) < 0.05) tac.holdFire(c); } });
+  check("`hold fire` during the window: they hold, and don't fire", held.tac.state === "holding" && held.hp === 1);
+  const resumed = fight({ secs: 30, each: (t, s, c, tac) => { if (Math.abs(t - 2) < 0.05) tac.holdFire(c); if (Math.abs(t - 10) < 0.05) tac.engage(c); } });
+  check("...and `engage` opens fire", resumed.tac.state === "engaged" && resumed.hp < 1);
+  const early = fight({ secs: 3, each: (t, s, c, tac) => { if (t < 0.05) tac.engage(c); } });
+  check("`engage` skips the window", early.tac.state === "engaged" && !early.states.includes("hold"));
+  // Once per encounter: out of range and back, no second window; a new cube, a new one.
+  const tac = new Tactical({ random: mulberry32(5) });
+  const sh = new ShipSystems({ seed: 11 });
+  const c1 = new Cube({ pos: [0, 0, -5], seed: 3, random: mulberry32(6) });
+  const run = (c, at, secs) => { const st = []; for (let t = 0; t < secs; t += 0.1) { tac.step(0.1, { cube: c, ship: sh, shipPos: at }); st.push(tac.state); } return st; };
+  run(c1, [0, 0, 0], HOLD_WINDOW + 1);
+  tac.holdFire(c1); tac.engage(c1);
+  run(c1, [0, 0, 100], 2);
+  const back = run(c1, [0, 0, 0], 2);
+  check("the hold window comes once per encounter", !back.includes("hold") && back.at(-1) === "engaged");
+  const c2 = new Cube({ pos: [0, 0, -5], seed: 4, random: mulberry32(7) });
+  check("...and again for the next cube", run(c2, [0, 0, 0], 1).includes("hold"));
+
+  // Who's at the guns.
+  const none = fight({ gunners: "none", secs: 120 });
+  const all = fight({ gunners: "all", secs: 120 });
+  check("with no Tactical crew at their stations the guns do almost nothing", none.hp > 0.95, `cube at ${(none.hp * 100).toFixed(0)}%`);
+  check("all hands at the guns do far more", 1 - all.hp > 4 * (1 - none.hp), `${((1 - all.hp) * 100).toFixed(0)}% vs ${((1 - none.hp) * 100).toFixed(0)}% shot away`);
+  const win = fight({ gunners: "all", secs: 360 });
+  check("all hands, standing their ground, disable a fresh cube", win.disabledAt != null && !win.ship.crewLost,
+    `in ${win.disabledAt?.toFixed(0)} s, ${win.ship.roster.alive().length} crew alive`);
+  check("...and the gun crew got better at it", win.ship.roster.crew.filter((m) => m.dept === "tactical").some((m) => (m.xp.weapons ?? 0) > 0));
+  check("a disabled cube stands Tactical down", (() => { win.tac.step(0.1, { cube: win.cube, ship: win.ship, shipPos: [0, 0, 0] }); return win.tac.state === "idle"; })());
+  const doomed = fight({ gunners: "none", secs: 600 });
+  check("with nobody at the guns, standing and fighting is fatal", doomed.ship.crewLost && doomed.disabledAt == null);
+
+  // Adaptation and rotation.
+  const stuck = fight({ gunners: "all", secs: 90, each: (t, s, c, tac) => { tac._nextBand = () => tac.band; } });
+  check("the cube adapts to a frequency it's hit with", stuck.cube.resist[0] > 0.6, stuck.cube.resist[0].toFixed(2));
+  check("...the crew notice, and rotate", all.said.some((s) => /rotating to/.test(s)) && all.tac.band !== 0);
+  check("rotating keeps the phasers biting", 1 - all.hp > 1.5 * (1 - fight({ gunners: "all", secs: 120, each: (t, s, c, tac) => { tac._nextBand = () => tac.band; } }).hp));
+
+  // Targeting.
+  check("by default they go for the emitters cutting at us first", (() => {
+    const f = fight({ gunners: "all", secs: 40 });
+    return f.cube.blocks.filter((b) => b.role === "emitter").some((b) => b.hp <= 0);
+  })());
+  const tr = fight({ gunners: "all", secs: 40, each: (t, s, c, tac) => { if (t < 0.05) tac.setTarget("tractor"); } });
+  check("`target tractor` puts the fire on the tractor array", tr.tac.aimingAt === "tractor" || tr.cube.blocks.some((b) => b.role === "tractor" && b.hp < 1));
+  check("bad orders are refused", !new Tactical().setTarget("bridge").ok && !new Tactical().setStance("angry").ok);
+
+  // The weapons as a ship system.
+  check("weapons are maintained by Tactical, with the weapons skill", MAINTENANCE.weapons?.dept === "tactical" && MAINTENANCE.weapons.skill === "weapons");
+  const wpn = new ShipSystems({ seed: 7 });
+  wpn.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 }, weaponsLoad: 0 });
+  const idleDraw = wpn.power.demand.weapons;
+  wpn.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 }, weaponsLoad: 1 });
+  check("the weapons draw power only when they're firing", idleDraw === 0 && wpn.power.demand.weapons > 15, `${idleDraw} → ${wpn.power.demand.weapons}`);
+  wpn.health.weapons = 0.1;
+  check("below 15% health the weapons are off-line", wpn.weaponsFactor() === 0);
+  const unpowered = fight({ gunners: "all", secs: 30, each: (t, s) => s.setPower("weapons", 0) });
+  check("with no power to the weapons there's no fire", unpowered.hp === 1 && unpowered.said.some((s) => /no power/.test(s)));
+  let fore = 0;
+  for (let i = 0; i < 30; i++) {
+    const s = new ShipSystems({ seed: 7 });
+    s.shields = 0;
+    s.hit({ energy: 0.8, from: [0, 0, 1], facing: [0, 0, 1] });
+    if (s.health.weapons < 1) fore++;
+  }
+  check("a hit on the bow can damage the weapons", fore > 0, `${fore}/30`);
+
+  // A held system's guard, once disabled, doesn't come back this mission.
+  const posOf = (o) => positionAt(o, byId, 0);
+  const stars = objects.filter((o) => o.type === "star");
+  const col = new Collective({ stars, home: stars[0], posOf, random: mulberry32(4) });
+  const sp = posOf(col.held[0]);
+  const near = [sp[0] + 100, sp[1], sp[2]];
+  col.step(0.1, { pos: near, mode: "impulse" });
+  for (const b of col.cube.blocks) if (b.role === "core") b.hp = 0;
+  const ev = col.step(0.1, { pos: near, mode: "impulse" });
+  for (let t = 0; t < 120; t += 1) col.step(1, { pos: near, mode: "impulse" });
+  check("a disabled guard drifts dark a while, then is gone for good", ev.some((e) => e.type === "disabled") && col.cube === null && col.defeated.size === 1);
+
+  // The alerts.
+  const al = new ShipSystems({ seed: 7 });
+  al.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } });
+  al.incoming = [{ kind: "cube", name: "Collective cube", dist: 6, eta: null, weapons: { state: "hold", holdLeft: 3.2 } }];
+  const h = assessThreats(al).find((x) => x.id === "cube-hold");
+  check("the hold window is an alert with its countdown and the order to hold", h && h.eta === 3.2 && h.action === "hold fire", h && h.title);
+  al.incoming[0].weapons = { state: "holding" };
+  check("holding: the alert offers to engage", assessThreats(al).find((x) => x.id === "cube")?.action === "engage");
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

@@ -4,6 +4,7 @@
 // signals.js "character" so a pulsar actually ticks, a gas giant churns, an
 // ice world chimes, a moon barely clicks, and so on — genuinely different
 // timbres and rhythms, not just the same tone at different pitches.
+import { strikesStarting, restrikes, lightningClock } from "./lightning.js";
 
 let ctx = null;
 let analyser = null;
@@ -63,6 +64,13 @@ function getCtx() {
   return ctx;
 }
 
+// The receiver's input, for anything that makes its own sound instead of
+// playSignal() — a broadcast song (anthem.js). Goes through the same tune
+// filter and analyser.
+export function receiver() {
+  return { ac: getCtx(), input: tuneFilter };
+}
+
 // Returns the shared analyser, so a visualizer can start reading data
 // (silence, pre-gesture) before LISTEN is ever pressed.
 export function getAnalyser() {
@@ -79,7 +87,9 @@ function makeNoiseBuffer(ac) {
 
 // Starts synthesizing `profile` (from signalProfile()). Returns a stop()
 // function that fades out and tears down every node it created.
-export function playSignal(profile) {
+// `lightningId`: a body with lightning (see lightning.js) — each of its
+// strikes is layered on top as a sferic crack, timed to the shader's flash.
+export function playSignal(profile, lightningId = null) {
   const ac = getCtx();
   const now = ac.currentTime;
   const nodes = [];
@@ -134,6 +144,7 @@ export function playSignal(profile) {
     nodes.push(l);
   };
   const period = (rate) => Math.max(0.06, 1 / Math.max(0.05, rate));
+  let filtTarget = null; // a filter cutoff that flares with each lightning strike, if the recipe has one
 
   switch (profile.character) {
     case "tone": { // star, cool/mid class — smooth sine with slow tremolo
@@ -156,6 +167,7 @@ export function playSignal(profile) {
     case "drone": { // toxic planet — two close detuned saws, beating/harsh
       const filt = ac.createBiquadFilter(); filt.type = "lowpass"; filt.frequency.value = profile.pitch * 4;
       nodes.push(filt); filt.connect(out);
+      filtTarget = { param: filt.frequency, base: profile.pitch * 4 }; // storm flashes open it up
       const a = osc("sawtooth", profile.pitch / 2), b = osc("sawtooth", profile.pitch / 2, profile.detune);
       const g = gain(0.35);
       a.connect(g); b.connect(g); g.connect(filt);
@@ -261,7 +273,52 @@ export function playSignal(profile) {
     }
   }
 
+  // Lightning sferics. Strikes are scheduled a little ahead on the audio
+  // clock (setInterval alone jitters by tens of ms; Web Audio times don't),
+  // mapping the shared performance.now() clock onto ac.currentTime. The
+  // output latency is taken off so the crack leaves the speakers when the
+  // flash reaches the screen, not a buffer later.
+  let strikeTimer = null;
+  if (lightningId) {
+    const noise = makeNoiseBuffer(ac);
+    const LOOKAHEAD = 0.3;
+    let scheduledTo = lightningClock();
+    // One broadband pop (the return stroke) with a short resonant body.
+    const crack = (t, level) => {
+      const src = ac.createBufferSource(); src.buffer = noise;
+      src.playbackRate.value = 0.8 + Math.random() * 0.4;
+      const hp = ac.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 400;
+      const g = ac.createGain(); g.gain.value = 0;
+      src.connect(hp); hp.connect(g); g.connect(out);
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(level, t + 0.002);
+      g.gain.exponentialRampToValueAtTime(level * 0.25, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+      src.start(t, Math.random() * 1.5); src.stop(t + 0.2);
+      src.onended = () => { src.disconnect(); hp.disconnect(); g.disconnect(); };
+    };
+    const schedule = () => {
+      const now = lightningClock();
+      const horizon = now + LOOKAHEAD;
+      const lag = (ac.outputLatency || 0) + (ac.baseLatency || 0) - 1 / 60;
+      for (const s of strikesStarting(lightningId, scheduledTo, horizon)) {
+        const t0 = ac.currentTime + (s.start - now) - lag;
+        if (t0 < ac.currentTime) continue; // missed (tab was asleep) — skip, don't pile up
+        crack(t0, 0.9 * s.intensity);
+        for (const r of restrikes(s)) crack(t0 + r.at, 0.5 * s.intensity * r.level);
+        if (filtTarget) {
+          filtTarget.param.setTargetAtTime(filtTarget.base * (1 + 3 * s.intensity), t0, 0.005);
+          filtTarget.param.setTargetAtTime(filtTarget.base, t0 + 0.03, s.dur / 3);
+        }
+      }
+      scheduledTo = horizon;
+    };
+    schedule();
+    strikeTimer = setInterval(schedule, 100);
+  }
+
   return function stop() {
+    clearInterval(strikeTimer);
     const stopAt = ac.currentTime + 0.3;
     out.gain.cancelScheduledValues(ac.currentTime);
     out.gain.setValueAtTime(out.gain.value, ac.currentTime);

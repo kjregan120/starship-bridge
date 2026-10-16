@@ -12,7 +12,7 @@
 // the regression; WaveField.jsx is the panel that shows what a signal
 // actually sounds like.
 import { useEffect, useRef } from "react";
-import { nearbyObjects } from "./engine.js";
+import { nearbyObjects, collective, sim } from "./engine.js";
 
 const RANGE = 400;
 const TYPE_STYLE = {
@@ -22,15 +22,28 @@ const TYPE_STYLE = {
   blackhole: { r: 3.5, color: "#ff6a3d" },
   pulsar: { r: 3, color: "#cfe8ff" },
   nebula: { r: 3, color: "#cc88ff" },
-  beacon: { r: 3, color: "#ffcc55" }
+  beacon: { r: 3, color: "#ffcc55" },
+  cube: { r: 3.5, color: "#3dff8a" }
 };
+
+// A Collective cube that's out, as a contact (collective.js).
+function cubeContact() {
+  const c = collective.cube;
+  if (!c || c.mode === "lost") return null;
+  const dx = c.pos[0] - sim.pos[0], dy = c.pos[1] - sim.pos[1], dz = c.pos[2] - sim.pos[2];
+  const d = Math.hypot(dx, dy, dz);
+  return d <= RANGE ? { o: { type: "cube" }, dx, dy, dz, d } : null;
+}
 
 export default function ContactRadar() {
   const canvasRef = useRef(null);
   const contactsRef = useRef([]);
 
   useEffect(() => {
-    const poll = () => { contactsRef.current = nearbyObjects(RANGE); };
+    const poll = () => {
+      const cube = cubeContact();
+      contactsRef.current = cube ? [cube, ...nearbyObjects(RANGE)] : nearbyObjects(RANGE);
+    };
     poll();
     const iv = setInterval(poll, 500);
     return () => clearInterval(iv);
@@ -77,6 +90,13 @@ export default function ContactRadar() {
         const x = cx + Math.sin(rad) * rr, y = cy - Math.cos(rad) * rr;
         const style = TYPE_STYLE[o.type] || TYPE_STYLE.moon;
         let radius = style.r, color = style.color, glow = 0;
+        if (o.type === "cube") {
+          // Square, and blinking.
+          g.fillStyle = color; g.shadowColor = color; g.shadowBlur = 8;
+          if (Math.floor(t / 400) % 2) g.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+          g.shadowBlur = 0;
+          return;
+        }
         if (o.type === "beacon") {
           const pulse = 0.5 + 0.5 * Math.sin(t / 260 + i);
           radius = style.r * (0.8 + pulse * 0.6);

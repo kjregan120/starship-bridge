@@ -8,6 +8,11 @@
 //   role    job title
 //   duty    primary duty (duties.js)
 //   kind    "officer" | "enlisted" | "medical" — shapes education and career
+//   shift   the watch the post stands: alpha (0800–1600), beta, gamma —
+//           dealt round-robin through each department, head of department
+//           on alpha, so every department has someone on every watch
+
+import { SHIFTS } from "../util.js";
 
 const officer = (rank) => ({ rank, kind: "officer" });
 const enlisted = (rank) => ({ rank, kind: "enlisted" });
@@ -75,7 +80,7 @@ const posts = {
 };
 
 export default Object.entries(posts).flatMap(([dept, list]) =>
-  list.map(([r, role, duty], i) => ({ slot: `${dept}-${i}`, dept, ...r, role, duty, senior: i === 0 }))
+  list.map(([r, role, duty], i) => ({ slot: `${dept}-${i}`, dept, ...r, role, duty, senior: i === 0, shift: SHIFTS[i % 3] }))
 );
 
 // Years of service a post is typically filled at, by rank: [min, max].
