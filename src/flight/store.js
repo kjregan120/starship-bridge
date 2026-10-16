@@ -51,6 +51,13 @@ export const useUI = create((set) => ({
   // lens.js holds the real value (CameraRig reads it every frame); the
   // `magnify` order in FlightApp.jsx updates both.
   lens: { zoom: 1, targetId: null, targetName: null },
+  // Which game mode is showing: the bridge, or the away team on a planet's
+  // surface (SurfaceApp.jsx). The sim runs regardless — see loop.js.
+  mode: "bridge", // "bridge" | "surface"
+  // A transporter effect in progress — { dir: "down"|"up", at (ms) } | null.
+  transport: null,
+  // The away mission (awayEngine.js), as a snapshot for the HUD | null.
+  away: null,
 
   setSnapshot: (snapshot) => set({ snapshot }),
   setNearest: (nearest) => set({ nearest }),
@@ -65,5 +72,8 @@ export const useUI = create((set) => ({
   setListening: (listening) => set({ listening }),
   setTunedBand: (tunedBand) => set({ tunedBand }),
   setDecoding: (decoding) => set({ decoding }),
-  setLens: (lens) => set({ lens: { ...lens } })
+  setLens: (lens) => set({ lens: { ...lens } }),
+  setMode: (mode) => set({ mode }),
+  setTransport: (transport) => set({ transport }),
+  setAway: (away) => set({ away })
 }));

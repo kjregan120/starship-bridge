@@ -15,6 +15,13 @@ const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const scale = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
 const unit = (a) => { const m = magnitude(a) || 1; return [a[0] / m, a[1] / m, a[2] / m]; };
 
+// Standard orbit: radius as a multiple of the body's size, how fast the
+// ship closes in to it (u/s), and how fast it circles (rad/s — about two
+// minutes a lap).
+const ORBIT_K = 1.6;
+const ORBIT_DESCENT = 0.4;
+const ORBIT_RATE = 0.05;
+
 export class FlightSim {
   constructor(universe, opts = {}) {
     this.objects = universe.objects;
@@ -129,6 +136,34 @@ export class FlightSim {
       ? `Helm, come about for ${o.name} — course plotted clear of ${route.hazards[0].body.name}.`
       : `Helm, come about for ${o.name}.`);
     return true;
+  }
+  // Standard orbit: from station-keeping at a planet or moon, close in to a
+  // tight orbit and circle it — near enough for the transporter (away.js).
+  // Any other helm order breaks orbit, the same as it ends station-keeping.
+  // On the way to a body (or naming one), the orbit is made on arrival.
+  standardOrbit(q) {
+    const held = this.heading?.type === "hold" ? this.byId[this.heading.id] : null;
+    const bound = this.heading?.type === "body" ? this.byId[this.heading.id] : null;
+    const body = q ? this.find(q) : held ?? bound;
+    if (q && !body) { this.log("deny", `No contact matching "${q}".`); return false; }
+    if (!body) { this.log("deny", "We're not holding station at anything. Come about for a planet or moon first."); return false; }
+    if (body.type !== "planet" && body.type !== "moon") { this.log("deny", `We can't make orbit around ${body.name}.`); return false; }
+    if (held?.id !== body.id) {
+      if (bound?.id !== body.id && !this.comeAbout(body.name)) return false;
+      this.orbitOnArrival = body.id;
+      this.log("order", `Standard orbit of ${body.name} when we arrive.`);
+      return true;
+    }
+    if (this.heading.orbit) { this.log("info", this.heading.orbit.established ? `Already in standard orbit of ${body.name}.` : `Entering orbit of ${body.name}.`); return true; }
+    this.heading.orbit = { radius: this.orbitRadius(body), established: false };
+    this.log("order", `Standard orbit, ${body.name}.`);
+    return true;
+  }
+  orbitRadius(body) { return Math.max(0.6, (body.size || 0) * ORBIT_K); }
+  // In an established standard orbit of `id` (or of anything, if no id).
+  inOrbit(id) {
+    const h = this.heading;
+    return h?.type === "hold" && !!h.orbit?.established && (id == null || h.id === id);
   }
   steerToPoint(p) {
     const route = this._planWaypoints(p, new Set());
@@ -347,6 +382,8 @@ export class FlightSim {
   // as the rest of the sim assumes engines just do what's ordered.
   _holdAt(id) {
     this.heading = { type: "hold", id, offset: sub(this.pos, this.posOf(id)) };
+    if (this.orbitOnArrival === id) this.heading.orbit = { radius: this.orbitRadius(this.byId[id]), established: false };
+    this.orbitOnArrival = null;
   }
 
   // How close impulse pulls up to a body before holding station — scaled to
@@ -378,6 +415,23 @@ export class FlightSim {
 
   _impulseStep(dt) {
     if (this.heading?.type === "hold") {
+      const o = this.heading.orbit;
+      if (o) {
+        // Spiral in to the orbit's radius, then keep circling.
+        let off = this.heading.offset;
+        const r = magnitude(off);
+        const nr = Math.max(o.radius, r - ORBIT_DESCENT * dt);
+        if (!o.established && nr <= o.radius) {
+          o.established = true;
+          this.log("arrive", `Standard orbit established around ${this.byId[this.heading.id].name}.`);
+        }
+        // Flatten toward the body's equator as we go, and swing around it.
+        if (Math.hypot(off[0], off[2]) < 1e-6) off = [1, 0, 0];
+        off = [off[0], off[1] * Math.max(0, 1 - dt * 0.5), off[2]];
+        const a = ORBIT_RATE * dt, c = Math.cos(a), s = Math.sin(a);
+        off = [off[0] * c - off[2] * s, off[1], off[0] * s + off[2] * c];
+        this.heading.offset = scale(off, nr / (magnitude(off) || 1));
+      }
       this.pos = add(this.posOf(this.heading.id), this.heading.offset);
       this.vel = [0, 0, 0];
       return;

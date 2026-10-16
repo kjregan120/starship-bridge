@@ -24,7 +24,7 @@ const WHERE_LABEL = { fore: "Fore", aft: "Aft", port: "Port", starboard: "Starbo
 const WATCH_MARK = { alpha: "α", beta: "β", gamma: "γ" };
 // Where someone is, for the roster.
 const whereLabel = (m) =>
-  m.status === "dead" ? "—" : m.location === "sickbay" ? "Sickbay" : m.location === "quarters" ? "Off watch" : WHERE_LABEL[m.where];
+  m.status === "dead" ? "—" : m.location === "away" ? "Away team" : m.location === "sickbay" ? "Sickbay" : m.location === "quarters" ? "Off watch" : WHERE_LABEL[m.where];
 const mmss = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
 const lv = (x) => (x > 0.7 ? "ok" : x > 0.4 ? "warn" : "crit");
 const openFile = (id) => useUI.getState().setPersonnel(id);
@@ -43,6 +43,7 @@ const AREAS = {
 const DOT = 10;                     // spacing when there's room; tighter when crowded
 
 function areaOf(m) {
+  if (m.location === "away") return null;   // not aboard
   if (m.location === "shelter") return "shelter";
   if (m.location === "sickbay") return "sickbay";
   if (m.location === "quarters") return m.quarters;
@@ -51,7 +52,7 @@ function areaOf(m) {
 
 function DeckPlan({ roster, ship, onSection }) {
   const groups = {};
-  for (const m of roster.crew) (groups[areaOf(m)] ??= []).push(m);
+  for (const m of roster.crew) if (areaOf(m)) (groups[areaOf(m)] ??= []).push(m);
   const dots = [];
   for (const [area, members] of Object.entries(groups)) {
     const a = AREAS[area];

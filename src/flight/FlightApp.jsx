@@ -6,6 +6,9 @@ import Science from "./Science.jsx";
 import Crew from "./Crew.jsx";
 import ViewscreenFX from "./ViewscreenFX.jsx";
 import GameOver from "./GameOver.jsx";
+import SurfaceApp from "./SurfaceApp.jsx";
+import { away, sitesOrder, teamOrder, beamDownOrder } from "./awayEngine.js";
+import { landable, landingSites } from "../universe/surface.js";
 import { useUI } from "./store.js";
 import { stopListening } from "./commsAudio.js";
 import { sim, ship, career, navList, nearestBody, nearbyObjects, startBodyName, byId, view, worldPos, collective, tactical } from "./engine.js";
@@ -38,7 +41,7 @@ const STATIONS = [
   { id: "comms", label: "COMMS" }
 ];
 const STATION_HELP = {
-  conn: "CONN — ahead full|half|quarter · reverse full|half|quarter · port|starboard <degrees> · all stop · come about for <name> · warp <1-3> to <name> · warp <1-3> · warp <1-3> route · drop out · magnify <1-10> · magnify in|out · magnify [<1-10>] on <name> to hold the viewer on a contact · magnify ahead · magnify off",
+  conn: "CONN — standard orbit at the planet or moon we're holding at · sites for its landing sites and missions · away team to see who'd go, away team <name>, <name> to choose · beam down [to site a|b|c] · ahead full|half|quarter · reverse full|half|quarter · port|starboard <degrees> · all stop · come about for <name> · warp <1-3> to <name> · warp <1-3> · warp <1-3> route · drop out · magnify <1-10> · magnify in|out · magnify [<1-10>] on <name> to hold the viewer on a contact · magnify ahead · magnify off",
   science: "SCIENCE — ship status. scan · status for a report · withdraw to pull away from whatever is cooking the ship · reactor <0-120> to set the reactor's output limit (over 100 runs hot) · power <shields|engines|sensors|comms|life> <0-150> to change a system's share · power reset · repair <reactor|radiators|impulse|warp|emitters|life|comms|sensors|fore|aft|port|starboard> to put repair crews on it first · repair all · silence alarm · voice on|off · mute / unmute.",
   crew: "CREW — the forty aboard, on three watches (alpha 0800, beta 1600, gamma 0000; a ship hour is a minute). call all hands to bring everyone to their stations (more hands, faster repairs — but they tire) · stand down to go back to watches · all hands to shelter (radiation shelter, stations unmanned) · resume stations · evacuate <fore|aft|port|starboard> · send injured to sickbay · crew report · file <name> to open a personnel file · reassign <name> to <department> (needs Qualified or better in that department's core skill) · reassign <name> back · cross-train <name> in <department> to have them learn it. Click a section on the deck plan to evacuate it; click a name for their file.",
   tactical: "TACTICAL — 3D chart. Drag to rotate, scroll to zoom, right-drag to pan. Shows any plotted course. In a fight the Tactical crew pick targets and rotate frequencies themselves; if no order comes in the few seconds after an enemy is in range, they engage. engage (or open fire) · hold fire · target <emitters|tractor|regen|core|auto> · stance <balanced|defensive|aggressive> · power weapons <0-150>.",
@@ -64,6 +67,7 @@ function statusReport() {
   const hurt = Object.entries(s.health).filter(([, v]) => v < 0.7).map(([k, v]) => `${k} ${p(v)}`);
   sim.log("info", hurt.length ? `  Damaged: ${hurt.join(", ")}.` : "  All components nominal.");
   if (s.warpInhibit) sim.log("info", `  Warp off-line — ${s.warpInhibit}.`);
+  if (s.stores.parts > 0.05 || s.stores.science > 0) sim.log("info", `  Stores: ${s.stores.parts.toFixed(1)} spare parts${s.stores.parts > 0.05 ? " (repairs faster)" : ""}, ${s.stores.science} science.`);
 }
 
 // Head straight away from whatever is putting the most heat and radiation
@@ -274,8 +278,14 @@ function handleCommand(text) {
   if (/^scan/.test(t)) {
     const n = nearestBody(80);
     sim.log("info", n ? `Scan — ${n.o.name}: ${n.o.scan || "No data."}` : "Nothing within sensor range.");
+    if (n && landable(n.o)) sim.log("info", `  ${landingSites(n.o).length} landing sites. "sites" for details.`);
     return;
   }
+  // Away missions (awayEngine.js).
+  if ((m = t.match(/^(?:standard orbit|enter (?:standard )?orbit|(?:make |assume )?orbit)(?:\s+(?:of\s+|around\s+)?(.+))?$/))) { sim.standardOrbit(m[1]); return; }
+  if (/^(sites|landing sites|missions|away missions)$/.test(t)) { sitesOrder(); return; }
+  if ((m = t.match(/^away team(?:\s+(.+))?$/))) { teamOrder(m[1]); return; }
+  if ((m = t.match(/^(?:beam (?:us |me )?down|energi[sz]e)(?:\s+(.+))?$/))) { beamDownOrder(m[1]); return; }
   if (/^(status|report|damage report)$/.test(t)) { statusReport(); return; }
   if (/^(withdraw|evasive|retreat|get us out(?: of here)?|fall back)$/.test(t)) { withdraw(); return; }
   // Tactical (tactical.js): optional — the crew fight on their own.
@@ -492,6 +502,8 @@ export default function FlightApp() {
   const alert = useUI((s) => s.alert);
   const shipSnap = useUI((s) => s.ship);
   const lensSnap = useUI((s) => s.lens);
+  const mode = useUI((s) => s.mode);
+  const transport = useUI((s) => s.transport);
   const [input, setInput] = useState("");
   const [shake, setShake] = useState(false);
   const seenCues = useRef(null);
@@ -527,6 +539,7 @@ export default function FlightApp() {
         warpReady: sim.canEngageWarp(), t: s.t
       });
       useUI.getState().setShip(ship.snapshot());
+      useUI.getState().setAway(away ? away.snapshot() : null);
       board.update(ship, (performance.now() - missionStart) / 1000);
       useUI.getState().setAlert({ level: board.level, threats: board.threats, incidents: board.incidents.slice() });
       updateVoice(board);
@@ -568,6 +581,8 @@ export default function FlightApp() {
     handleCommand(input);
     setInput("");
   }
+
+  if (mode === "surface") return <><SurfaceApp runOrder={handleCommand} /><GameOver /></>;
 
   const Screen = SCREEN_FOR_STATION[station] ?? Scene;
   const flashStations = new Set(alert.threats.filter((t) => t.level === "red").map(stationFor));
@@ -630,6 +645,7 @@ export default function FlightApp() {
               itself keeps advancing regardless, via loop.js. */}
           <Screen />
           {station === "conn" && <ViewscreenFX />}
+          {transport && <div className={`beam-fx ${transport.dir}`} />}
           <div className="viewer-tag">{VIEWER_TAG[station]}{station === "conn" && lensSnap.zoom !== 1 && ` · ${fmtZoom(lensSnap.zoom)}`}{station === "conn" && lensSnap.targetName && ` · ${lensSnap.targetName.toUpperCase()}`}</div>
         </section>
 

@@ -10,6 +10,7 @@ import { ejecta, ejectaClock } from "./ejecta.js";
 import { cmeStep, cmeEffects } from "../universe/cme.js";
 import { WEAPON_RANGE, SPEED as CUBE_SPEED } from "../universe/cube.js";
 import { playHail } from "./hail.js";
+import { awayTick } from "./awayEngine.js";
 
 const MAX_BANK = 0.35;     // ~20° roll at most
 const BANK_PER_YAW = 0.45; // rad of roll per rad/s of yaw — full turnRate (π/4) ≈ 20°
@@ -81,6 +82,7 @@ export function startSimLoop() {
     if ((fluxIn -= dt) <= 0) { flux = shipFlux(); fluxIn = 0.25; }
     ship.step(dt, { mode: sim.mode, throttle: sim.throttle, warpFactor: sim.warpFactor, flux, weaponsLoad: tactical.load });
     ship.incoming = [...cubeTick(dt), ...cmeTick()];
+    awayTick(dt);
     sim.impulseFactor = ship.impulseFactor;
     sim.warpLimit = ship.warpMax;
     sim.warpInhibit = ship.warpInhibit;

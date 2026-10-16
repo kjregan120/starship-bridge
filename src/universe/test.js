@@ -15,6 +15,12 @@ import { Cube, mulberry32, HOLD, DETECT, WEAPON_RANGE, TRACTOR_RANGE, LOSE } fro
 import { Collective, collectiveSystems, HOME_SPACE, ROAM_COOLDOWN } from "./collective.js";
 import { Tactical, HOLD_WINDOW } from "./tactical.js";
 import { MAINTENANCE } from "./ship.js";
+import { FlightSim } from "./sim.js";
+import { Roster } from "./crew.js";
+import { makeTerrain, SITE_RADIUS } from "./terrain.js";
+import { surfaceKind, landable, landingSites, terrainFor, sunAt, stormAt, ENV } from "./surface.js";
+import { missionFor, objectiveStatus, payout } from "./missions.js";
+import { AwayMission, canBeam, pickTeam } from "./away.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const universe = JSON.parse(readFileSync(join(here, "universe.json"), "utf8"));
@@ -796,6 +802,182 @@ console.log("\n17. Fighting back: weapons and the Tactical crew");
   al.incoming[0].weapons = { state: "holding" };
   check("holding: the alert offers to engage", assessThreats(al).find((x) => x.id === "cube")?.action === "engage");
 }
+
+console.log("\nAway team: landing sites, missions, the transporter, the surface");
+{
+  const giant = objects.find((o) => o.type === "planet" && o.kind === "gas giant");
+  const rock = objects.find((o) => o.type === "planet" && o.kind === "rocky");
+  const icyMoon = objects.find((o) => o.type === "moon" && o.kind === "icy");
+  check("gas giants and stars can't be landed on; rocky planets and moons can",
+    !landable(giant) && !landable(aStar) && landable(rock) && landable(icyMoon) && surfaceKind(icyMoon) === "moon-icy");
+  check("every surface kind has an environment", Object.keys(ENV).every((k) => ENV[k].ground.length === 3));
+
+  const sites = landingSites(rock);
+  check("a body has three landing sites, the same every time",
+    sites.length === 3 && JSON.stringify(sites) === JSON.stringify(landingSites(rock)));
+  const ter = terrainFor(sites[0]);
+  const ter2 = makeTerrain(sites[0].kind, sites[0].seed);
+  check("terrain is deterministic", ter.heightAt(123.4, -56.7) === ter2.heightAt(123.4, -56.7));
+  check("the landing pad is level", Math.abs(ter.heightAt(0, 0) - ter.heightAt(6, -6)) < 0.5,
+    `${ter.heightAt(0, 0).toFixed(2)} vs ${ter.heightAt(6, -6).toFixed(2)}`);
+  const s0 = sunAt(sites[0], 0), s1 = sunAt(sites[0], s0.dayLength / 2);
+  check("the sun moves across the sky over a day", Math.abs(s0.elevation - s1.elevation) > 0.1 || Math.abs(s0.dir[0] - s1.dir[0]) > 0.1);
+
+  // Every landable body gets missions that fit its sites.
+  let bad = 0, n = 0;
+  const kinds = {};
+  for (const o of objects.filter(landable).slice(0, 120)) {
+    for (const site of landingSites(o)) {
+      const t = terrainFor(site);
+      const m = missionFor(site, t);
+      n++; kinds[m.type] = (kinds[m.type] ?? 0) + 1;
+      for (const p of m.pois) {
+        if (Math.hypot(...p.pos) > SITE_RADIUS) bad++;
+        if (t.water != null && t.heightAt(...p.pos) < t.water) bad++;
+      }
+    }
+  }
+  check("mission points of interest are all inside the site and out of the water", bad === 0, `${bad} misplaced of ${n} missions`);
+  check("all three mission types turn up", kinds.science > 0 && kinds.resource > 0 && kinds.rescue > 0, JSON.stringify(kinds));
+  const tox = landingSites(objects.find((o) => o.kind === "toxic"))[0];
+  let storms = 0;
+  for (let t = 0; t < 2000; t += 10) storms += stormAt(tox, t) ? 1 : 0;
+  check("toxic worlds have storms some of the time", storms > 0 && storms < 200, `${storms}/200 samples`);
+
+  // Standard orbit, then the transporter.
+  const sim = new FlightSim(universe, { startPos: [0, 0, 0] });
+  const pp = positionAt(rock, byId, 0);
+  sim.pos = [pp[0] + rock.size * 4, pp[1], pp[2]];
+  sim._holdAt(rock.id);
+  const ship = new ShipSystems({ seed: 3 });
+  ship.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } });
+  const site = sites[0];
+  check("no beaming from station-keeping", !canBeam({ ship, sim, body: rock, site, t: 0 }).ok,
+    canBeam({ ship, sim, body: rock, site, t: 0 }).why);
+  sim.standardOrbit();
+  for (let i = 0; i < 400 && !sim.inOrbit(rock.id); i++) sim.step(0.1);
+  const r = dist(sim.pos, sim.posOf(rock.id));
+  check("standard orbit closes in to the orbit radius", sim.inOrbit(rock.id) && Math.abs(r - sim.orbitRadius(rock)) < 0.01,
+    `${r.toFixed(2)} vs ${sim.orbitRadius(rock).toFixed(2)}`);
+  check("in standard orbit the transporter works", canBeam({ ship, sim, body: rock, site, t: 0 }).ok,
+    canBeam({ ship, sim, body: rock, site, t: 0 }).why);
+  const p1 = sim.pos.slice();
+  for (let i = 0; i < 100; i++) sim.step(0.1);
+  check("the ship circles in orbit, at the same radius", dist(p1, sim.pos) > 0.05 && Math.abs(dist(sim.pos, sim.posOf(rock.id)) - sim.orbitRadius(rock)) < 0.01);
+  ship.tractored = true;
+  check("a tractor beam blocks the transporter", !canBeam({ ship, sim, body: rock, site, t: 0 }).ok);
+  ship.tractored = false;
+  sim.ahead(0.5);
+  check("leaving orbit takes the transporter away", !canBeam({ ship, sim, body: rock, site, t: 0 }).ok);
+
+  // The away team, off the ship's books.
+  const roster = ship.roster;
+  const team = pickTeam(roster, "science");
+  check("the first officer picks three for a survey, a scientist among them",
+    team.length === 3 && team.some((m) => m.dept === "science"), team.map((m) => `${m.name} (${m.dept})`).join(", "));
+  const sci = roster.staffing("science");
+  roster.sendAway(team.map((m) => m.id));
+  check("an away team leaves its posts short", roster.staffing("science") <= sci && roster.away().length === 3,
+    `science staffing ${sci.toFixed(2)} → ${roster.staffing("science").toFixed(2)}`);
+  roster.settle();
+  check("standing orders don't pull away crew back aboard", roster.away().length === 3);
+
+  // A survey worked by the team on their own: the captain walks to each
+  // point and waits; nobody gives an order.
+  const allSites = objects.filter(landable).flatMap(landingSites);
+  const sciSites = allSites.filter((s) => missionFor(s, terrainFor(s)).type === "science" && ENV[s.kind].suit == null);
+  const sciSite = sciSites[0];
+  const ter3 = terrainFor(sciSite);
+  const mission = missionFor(sciSite, ter3);
+  const away = new AwayMission({ body: byId[sciSite.bodyId], site: sciSite, terrain: ter3, mission, roster, members: team });
+  const walkTo = (aw, pos, secs, sh) => {
+    for (let t = 0; t < secs; t += 0.1) {
+      const c = aw.captain.pos, d = [pos[0] - c[0], pos[1] - c[1]];
+      aw.step(0.1, { move: Math.hypot(...d) > 4 ? d : [0, 0] });
+      sh?.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } });
+    }
+  };
+  const xpOf = (ms) => ms.reduce((a, m) => a + Object.values(m.xp).reduce((x, y) => x + y, 0), 0);
+  const xp0 = xpOf(team);
+  for (const p of mission.pois) walkTo(away, p.pos, 200);
+  check("with no orders the team works every point the captain leads them to", away.complete(),
+    objectiveStatus(mission).map((o) => `${o.label} ${o.have}/${o.need}`).join(", "));
+  check("the work is practice", xpOf(team) > xp0 + 30, `+${(xpOf(team) - xp0).toFixed(0)} xp`);
+  check("a finished survey pays science", payout(mission).science > 0, `${payout(mission).science}`);
+  walkTo(away, [0, 0], 300);
+  const out = away.extract();
+  check("everyone within range of the captain beams up together", out.party.team.length === 3 && out.party.left.length === 0,
+    `${out.party.team.length} up, ${out.party.left.length} left`);
+  ship.addStores(out.haul);
+  check("the haul goes into the ship's stores", ship.stores.science === out.haul.science);
+  roster.recall(team.map((m) => m.id));
+  check("recalled crew are back aboard", roster.away().length === 0 && team.every((m) => m.location !== "away"));
+
+  // Orders: send someone named to a task.
+  const sciSite2 = sciSites[1];
+  const t2 = terrainFor(sciSite2);
+  const ro2 = new Roster(40, 0);
+  const tm2 = pickTeam(ro2, "science");
+  ro2.sendAway(tm2.map((m) => m.id));
+  const aw2 = new AwayMission({ body: byId[sciSite2.bodyId], site: sciSite2, terrain: t2, mission: missionFor(sciSite2, t2), roster: ro2, members: tm2 });
+  const who = tm2[0].name.split(" ").slice(-1)[0].toLowerCase();
+  const res = aw2.order(`${who} scan`);
+  for (let t = 0; t < 400 && !aw2.mission.pois.some((p) => p.kind === "anomaly" && p.done); t += 0.1) aw2.step(0.1);
+  check("'<name> scan' sends them to the nearest anomaly and they do it", res.ok && aw2.mission.pois.some((p) => p.kind === "anomaly" && p.done), res.msg);
+  aw2.order("hold here");
+  const before = aw2.team.map((a) => a.pos.slice());
+  for (let t = 0; t < 20; t += 0.1) aw2.step(0.1, { move: [1, 0] });
+  check("hold here keeps the team in place", aw2.team.every((a, i) => dist2(a.pos, before[i]) < 0.01));
+
+  // Suit air runs out on an airless world, and it hurts.
+  const moonSite = landingSites(objects.find((o) => o.type === "moon" && o.kind === "cratered"))[0];
+  const ro3 = new Roster(40, 0);
+  const tm3 = pickTeam(ro3, "resource");
+  ro3.sendAway(tm3.map((m) => m.id));
+  const t3 = terrainFor(moonSite);
+  const aw3 = new AwayMission({ body: byId[moonSite.bodyId], site: moonSite, terrain: t3, mission: missionFor(moonSite, t3), roster: ro3, members: tm3 });
+  const sh3 = { breached: () => [], harm: {}, doseRate: 0, heat: 0, hull: { fore: 1, aft: 1, port: 1, starboard: 1 } };
+  for (let t = 0; t < aw3.env.suit + 30; t += 0.5) { aw3.step(0.5); ro3.step(0.5, sh3, t); }
+  check("out of suit air, the team and the captain take harm",
+    aw3.suit === 0 && aw3.captain.health < 1 && tm3.every((m) => m.health < 1),
+    `captain ${aw3.captain.health.toFixed(2)}, team ${tm3.map((m) => m.health.toFixed(2)).join(" ")}`);
+  for (let t = 0; t < 300; t += 0.5) { aw3.step(0.5); ro3.step(0.5, sh3, 1000 + t); }
+  check("stay long enough and people die of it, recorded as suit failure",
+    tm3.some((m) => m.health <= 0 && m.cause === "suit") && ro3.events.some((e) => e.kind === "death"));
+  check("and the captain can die too", aw3.captainDead);
+
+  // A rescue: leave the survivors and they die; stabilise them and they live.
+  const resSite = allSites.find((s) => missionFor(s, terrainFor(s)).type === "rescue" && ENV[s.kind].suit == null);
+  const t4 = terrainFor(resSite);
+  const ro4 = new Roster(40, 0);
+  const tm4 = pickTeam(ro4, "rescue");
+  ro4.sendAway(tm4.map((m) => m.id));
+  check("a rescue team brings a medic", tm4.some((m) => m.dept === "medical"), tm4.map((m) => m.dept).join(", "));
+  const left = missionFor(resSite, t4);
+  const aw4a = new AwayMission({ body: byId[resSite.bodyId], site: resSite, terrain: t4, mission: left, roster: ro4, members: tm4 });
+  for (let t = 0; t < 900; t += 0.5) aw4a.step(0.5);
+  check("survivors left alone die", left.pois.every((p) => p.dead));
+  const saved = missionFor(resSite, t4);
+  const aw4 = new AwayMission({ body: byId[resSite.bodyId], site: resSite, terrain: t4, mission: saved, roster: ro4, members: tm4 });
+  walkTo(aw4, saved.wreck, 150);
+  walkTo(aw4, [0, 0], 200);
+  const r4 = aw4.extract();
+  check("stabilised survivors walk out with the team and beam up", r4.haul.rescued === saved.pois.length && r4.complete,
+    `${r4.haul.rescued}/${saved.pois.length} rescued`);
+
+  // Spare parts speed up repairs.
+  const fix = (parts) => {
+    const s = new ShipSystems({ seed: 4 });
+    s.health.sensors = 0.5;
+    s.addStores({ parts });
+    for (let t = 0; t < 60; t += 0.1) s.step(0.1, { mode: "impulse", throttle: 0, flux: { heat: 0, rad: 0 } });
+    return s;
+  };
+  const plain = fix(0), boosted = fix(5);
+  check("spare parts make repairs faster, and get used up", boosted.health.sensors > plain.health.sensors && boosted.stores.parts < 5,
+    `${plain.health.sensors.toFixed(3)} vs ${boosted.health.sensors.toFixed(3)}, ${boosted.stores.parts.toFixed(2)} parts left`);
+}
+function dist2(a, b) { return Math.hypot(a[0] - b[0], a[1] - b[1]); }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
