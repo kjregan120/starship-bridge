@@ -5,6 +5,7 @@
 // what's playing; only this module touches the actual audio nodes.
 import { playSignal } from "./audio.js";
 import { playSong } from "./anthem.js";
+import { hasLightning } from "./lightning.js";
 import { useUI } from "./store.js";
 import { cancelDecode } from "./decodeEngine.js";
 
@@ -13,7 +14,7 @@ let stopFn = null;
 export function startListening(obj, profile) {
   stopListening();
   // A body that broadcasts a song (universe.json `song`) plays that instead.
-  stopFn = (obj.song && playSong(obj.song)) || playSignal(profile);
+  stopFn = (obj.song && playSong(obj.song)) || playSignal(profile, hasLightning(obj) ? obj.id : null);
   useUI.getState().setListening({ id: obj.id, name: obj.name });
 }
 

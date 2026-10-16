@@ -23,6 +23,7 @@
 //                 curtains around both poles ("rainbow" is the only style)
 import * as THREE from "three";
 import { SIMPLEX, seedFor } from "./starShader.js";
+import { MAX_STRIKES, FLICKER_GLSL, hasLightning, activeStrikes, lightningClock } from "./lightning.js";
 import { makeEruptions } from "./eruptions.js";
 
 const KIND_DEFINE = {
@@ -242,23 +243,20 @@ vec3 sp = p + uSeed;
   plCol = mix(uBase * vec3(0.5, 0.55, 0.3), mix(uBase, vec3(1.0, 1.0, 0.7), 0.45), smoothstep(-0.8, 0.8, cloud * 1.6 + 0.3 * bands));
   plH = 0.03 * cloud;
   plRough = 1.0;
-  // Lightning: each cell of a coarse grid gets a few-percent chance to flash
-  // in each third-of-a-second slot — a decaying, stuttering blue-white blob
+  // Lightning: strikes come from lightning.js (shared with the comms audio,
+  // so each flash has its crack) — a decaying, stuttering blue-white blob
   // that lights the cloud deck from inside. Dim by day, vivid at night.
-  vec3 lq = p * 3.5, lc = floor(lq);
-  float lt = uTime * 3.0, slot = mod(floor(lt), 97.0);
-  vec3 lr = plHash3(lc + slot * 0.37 + uSeed.z);
-  if (lr.x < 0.05) {
-    // Centre kept 0.35 from the cell walls and the falloff tight enough to
-    // reach ~0 before them, or the flash gets cut off square at the edge.
-    vec3 lctr = lc + 0.35 + 0.3 * plHash3(lc + uSeed.x);
-    float ld = length(lq - lctr);
-    float tt = fract(lt);
-    float flick = (1.0 - tt) * (0.5 + 0.5 * step(0.5, fract(tt * 7.0 + lr.y)));
+  #ifdef HAS_LIGHTNING
+  for (int i = 0; i < ${MAX_STRIKES}; i++) {
+    if (uStrike[i].w <= 0.0) continue;
+    float ld = 3.5 * length(p - uStrike[i].xyz);
+    float tt = uStrikeT[i].x, ph = uStrikeT[i].y;
+    float flick = ${FLICKER_GLSL};
     float glow = exp(-ld * ld * 45.0) + 0.6 * exp(-ld * ld * 300.0);   // diffuse halo + bright core
     float lit = 0.4 + 0.6 * smoothstep(-0.4, 0.6, fbm3(sp * 14.0 + uTime)); // lights the cloud texture unevenly
-    plEmit += vec3(0.7, 0.8, 1.0) * glow * lit * flick * mix(0.3, 2.2, plNight);
+    plEmit += vec3(0.7, 0.8, 1.0) * glow * lit * flick * uStrike[i].w * mix(0.3, 2.2, plNight);
   }
+  #endif
 
 #elif defined(KIND_VOLCANIC)
   // Io: sulfur plains in yellow, white and orange; dark calderas ringed by
@@ -436,6 +434,10 @@ ${NOISE_HELPERS}`)
 uniform float uTime; uniform vec3 uSeed; uniform vec3 uBase; uniform vec3 uAtmo; uniform float uBump; uniform float uGlow;
 #ifdef KIND_LAVA
 uniform vec3 uVents[VENTS]; uniform float uVentHeat[VENTS];
+#endif
+#ifdef HAS_LIGHTNING
+uniform vec4 uStrike[${MAX_STRIKES}];   // xyz: unit-sphere position, w: intensity (0 = unused)
+uniform vec2 uStrikeT[${MAX_STRIKES}];  // x: age / duration, y: flicker phase
 #endif
 ${LIGHT_UNIFORMS}
 varying vec3 vObjPos;
@@ -648,6 +650,7 @@ export function makePlanetParts(obj, star) {
     ...(kind === "moon-icy" ? { ICY_MOON: "" } : {}),
     ...(obj.habitable && (kind === "class-M" || kind === "ocean") ? { HAS_CITIES: "" } : {}),
     ...(displace ? { HAS_DISPLACE: "" } : {}),
+    ...(hasLightning(obj) ? { HAS_LIGHTNING: "" } : {}),
     ...(obj.glow ? { HAS_GLOW: "" } : {}),
   };
   const seed = seedFor(obj.id);
@@ -670,6 +673,11 @@ export function makePlanetParts(obj, star) {
     uDisp: { value: displace ? r * 0.045 : 0 },
     uGlow: { value: obj.glow ?? 0 },
   };
+  const lightning = hasLightning(obj);
+  if (lightning) {
+    surfUniforms.uStrike = { value: Array.from({ length: MAX_STRIKES }, () => new THREE.Vector4()) };
+    surfUniforms.uStrikeT = { value: Array.from({ length: MAX_STRIKES }, () => new THREE.Vector2()) };
+  }
   // Bump strength per kind — terrain worlds get relief, cloud-tops barely any.
   // Volcanoes: where they are (fixed by the body's seed) and how hot each
   // is right now (eruptions.js flares them).
@@ -746,6 +754,16 @@ export function makePlanetParts(obj, star) {
     tick(t, center, sun) {
       eruptions?.update(t);
       time.value = t;
+      if (lightning) {
+        const now = lightningClock();
+        const active = activeStrikes(obj.id, now);
+        surfUniforms.uStrike.value.forEach((v, i) => {
+          const s = active[i];
+          if (!s) { v.w = 0; return; }
+          v.set(s.pos[0], s.pos[1], s.pos[2], s.intensity);
+          surfUniforms.uStrikeT.value[i].set((now - s.start) / s.dur, s.phase);
+        });
+      }
       light.uCenter.value.copy(center);
       light.uSun.value.copy(sun);
       for (const m of [atmosphere, rings?.material, aurora]) {
