@@ -169,6 +169,9 @@ function makeWarpStreaks() {
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
+    // The shader builds each quad in screen space, so its winding comes out
+    // clockwise whichever way the streak points. Front-face culling hid them all.
+    side: THREE.DoubleSide,
   });
 
   const flashGeometry = new THREE.PlaneGeometry(2, 2);
