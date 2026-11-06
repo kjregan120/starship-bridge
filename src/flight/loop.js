@@ -11,6 +11,7 @@ import { cmeStep, cmeEffects } from "../universe/cme.js";
 import { WEAPON_RANGE, SPEED as CUBE_SPEED } from "../universe/cube.js";
 import { playHail } from "./hail.js";
 import { awayTick } from "./awayEngine.js";
+import { warpCharge, warpJump, warpDrop } from "./warpAudio.js";
 
 const MAX_BANK = 0.35;     // ~20° roll at most
 const BANK_PER_YAW = 0.45; // rad of roll per rad/s of yaw — full turnRate (π/4) ≈ 20°
@@ -71,16 +72,29 @@ export function startSimLoop() {
   let raf;
   let last = performance.now();
   let flux = { heat: 0, rad: 0 }, fluxIn = 0;
+  let wasCharging = null, wasMode = sim.mode, stopCharge = null;
   const tick = (now) => {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
     const scale = sim.mode === "warp" ? 40 : 1; // compress warp into seconds
     const prev = view.facing;
     sim.step(dt * scale, dt);
+    // Warp drive sounds, on the sim's transitions.
+    if (sim.warpCharge !== wasCharging) {
+      stopCharge?.(); stopCharge = null;
+      if (sim.warpCharge) stopCharge = warpCharge(sim.warpCharge.left);
+      wasCharging = sim.warpCharge;
+    }
+    if (sim.mode !== wasMode) {
+      if (sim.mode === "warp") warpJump(); else warpDrop();
+      wasMode = sim.mode;
+    }
     // Stellar flux only changes as fast as the ship moves — a few times a
     // second is plenty for a sum over every star.
     if ((fluxIn -= dt) <= 0) { flux = shipFlux(); fluxIn = 0.25; }
-    ship.step(dt, { mode: sim.mode, throttle: sim.throttle, warpFactor: sim.warpFactor, flux, weaponsLoad: tactical.load });
+    // Charging the coils draws warp power already — that's where the other
+    // systems' share goes.
+    ship.step(dt, { mode: sim.warpCharge ? "warp" : sim.mode, throttle: sim.throttle, warpFactor: sim.warpFactor, flux, weaponsLoad: tactical.load });
     ship.incoming = [...cubeTick(dt), ...cmeTick()];
     awayTick(dt);
     sim.impulseFactor = ship.impulseFactor;

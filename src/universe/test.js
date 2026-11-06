@@ -13,7 +13,7 @@ import { parseMagnify, clampZoom, MAX_ZOOM } from "../flight/lens.js";
 import { cmeStep, cmeEta, cmeEnergy, cmeEffects, frontReach } from "./cme.js";
 import { Cube, mulberry32, HOLD, DETECT, WEAPON_RANGE, TRACTOR_RANGE, LOSE } from "./cube.js";
 import { Collective, collectiveSystems, HOME_SPACE, ROAM_COOLDOWN } from "./collective.js";
-import { Tactical, HOLD_WINDOW } from "./tactical.js";
+import { Tactical, HOLD_WINDOW, TORPEDO_RANGE, MAGAZINE } from "./tactical.js";
 import { MAINTENANCE } from "./ship.js";
 import { FlightSim } from "./sim.js";
 import { Roster } from "./crew.js";
@@ -801,6 +801,30 @@ console.log("\n17. Fighting back: weapons and the Tactical crew");
   check("the hold window is an alert with its countdown and the order to hold", h && h.eta === 3.2 && h.action === "hold fire", h && h.title);
   al.incoming[0].weapons = { state: "holding" };
   check("holding: the alert offers to engage", assessThreats(al).find((x) => x.id === "cube")?.action === "engage");
+
+  // Torpedoes: the captain fires them.
+  let said1 = { ok: false, text: "never fired" };
+  const salvo = fight({ gunners: "all", secs: 12, each: (t, s, c, tac) => { if (Math.abs(t - 0.5) < 0.05) said1 = tac.fireTorpedo(c, s, [0, 0, 0]); } });
+  check("`fire torpedo` launches one, opens the fight, and it lands", said1.ok && salvo.tac.torpedoes === MAGAZINE - 1 &&
+    salvo.tac.state === "engaged" && salvo.said.some((x) => /torpedo (hit|missed)/.test(x)), said1.text);
+  const t2 = new Tactical({ random: mulberry32(9) }), s2 = new ShipSystems({ seed: 7 }), c3 = new Cube({ pos: [0, 0, -5], seed: 3, random: mulberry32(2) });
+  t2.fireTorpedo(c3, s2, [0, 0, 0]);
+  check("...the tube has to reload before the next", !t2.fireTorpedo(c3, s2, [0, 0, 0]).ok && t2.torpedoes === MAGAZINE - 1);
+  check("...and they won't fire out of range", !new Tactical().fireTorpedo(c3, s2, [0, 0, TORPEDO_RANGE + 6]).ok);
+  t2.torpedoes = 0; t2.tubeLoad = 0;
+  check("...or with the magazine empty", /out of torpedoes/.test(t2.fireTorpedo(c3, s2, [0, 0, 0]).text));
+  // Torpedoes carry no frequency: against a cube fully adapted to every band they still bite, the phasers don't.
+  const adapted = () => { const c = new Cube({ pos: [0, 1.2, -5], seed: 3, random: mulberry32(12) }); c.resist.fill(0.9); return c; };
+  const sumHp = (c) => c.blocks.reduce((a, b) => a + b.hp, 0);
+  const phOnly = fight({ gunners: "all", secs: 30, cube: adapted(), each: (t, s, c) => c.resist.fill(0.9) });
+  const withT = fight({ gunners: "all", secs: 30, cube: adapted(), each: (t, s, c, tac) => { c.resist.fill(0.9); if (tac.tubeLoad === 0) tac.fireTorpedo(c, s, [0, 0, 0]); } });
+  check("torpedoes still hurt a cube that has adapted to the phasers", sumHp(withT.cube) < sumHp(phOnly.cube) - 3,
+    `${(withT.hp * 100).toFixed(0)}% vs ${(phOnly.hp * 100).toFixed(0)}% left`);
+  const restock = new Tactical(); restock.torpedoes = 3;
+  for (let t = 0; t < 200; t += 1) restock.step(1, { cube: null, ship: s2, shipPos: [0, 0, 0] });
+  check("between fights the armory builds more", restock.torpedoes === 5, `${restock.torpedoes}`);
+  al.incoming[0].weapons = { state: "engaged", torpInRange: true, torpedoes: 4, tubeLoad: 0 };
+  check("in range, the alerts offer `fire torpedo`", assessThreats(al).find((x) => x.id === "cube-torpedo")?.action === "fire torpedo");
 }
 
 console.log("\nAway team: landing sites, missions, the transporter, the surface");
@@ -862,8 +886,29 @@ console.log("\nAway team: landing sites, missions, the transporter, the surface"
   check("in standard orbit the transporter works", canBeam({ ship, sim, body: rock, site, t: 0 }).ok,
     canBeam({ ship, sim, body: rock, site, t: 0 }).why);
   const p1 = sim.pos.slice();
-  for (let i = 0; i < 100; i++) sim.step(0.1);
+  const bearing = () => { const b = sim.posOf(rock.id).map((c, i) => c - sim.pos[i]), m = Math.hypot(...b); return b.reduce((s, c, i) => s + (c / m) * sim.facing[i], 0); };
+  const b1 = bearing();
+  for (let i = 0; i < 300; i++) sim.step(0.1);
   check("the ship circles in orbit, at the same radius", dist(p1, sim.pos) > 0.05 && Math.abs(dist(sim.pos, sim.posOf(rock.id)) - sim.orbitRadius(rock)) < 0.01);
+  check("...turning with it, so the body stays put on the viewscreen", Math.abs(bearing() - b1) < 0.01, `cos ${b1.toFixed(3)} → ${bearing().toFixed(3)}`);
+  {
+    // Warp charges the coils before it jumps.
+    const ws = new FlightSim(universe, { startPos: [50000, 0, 50000] });
+    check("deep space: clear to warp", ws.canEngageWarp());
+    ws.engageWarp(null, 2);
+    ws.step(0.1);
+    check("engaging warp charges first, at impulse", ws.mode === "impulse" && ws.warpChargeProgress > 0);
+    for (let i = 0; i < 20; i++) ws.step(0.1);
+    check("...then jumps when the charge is done", ws.mode === "warp" && ws.warpCharge === null,
+      ws.events.map((e) => e.msg).slice(-2).join(" | "));
+    ws.allStop();
+    ws.engageWarp(null, 2); ws.step(0.5); ws.allStop();
+    for (let i = 0; i < 20; i++) ws.step(0.1);
+    check("another helm order aborts the charge", ws.mode === "impulse" && ws.warpCharge === null);
+    ws.engageWarp(null, 2); ws.step(0.5); ws.warpInhibit = "reactor scrammed"; ws.step(0.1);
+    check("losing warp aborts the charge", ws.warpCharge === null && ws.mode === "impulse");
+  }
+
   ship.tractored = true;
   check("a tractor beam blocks the transporter", !canBeam({ ship, sim, body: rock, site, t: 0 }).ok);
   ship.tractored = false;

@@ -9,12 +9,17 @@
 // cylinders; the tractor beam is a shaft from a tractor node to the ship.
 // Our own phasers (tactical.js shots) are orange, from the bow to the
 // block they hit, with a flash where they land; a miss streaks past.
+// Torpedoes (tactical.js torps) are a hot red-white point with a halo,
+// crossing from where they were launched to their face, and a detonation
+// where they land — a miss bursts short of it.
 import * as THREE from "three";
 import { CELL, N } from "../universe/cube.js";
 
 const BEAM_SLOTS = 12;
 const PHASER_SLOTS = 6;
 const PHASER_SHOWN = 0.35;   // s — matches tactical.js SHOT_SHOWN
+const TORP_SLOTS = 4;
+const BLAST_SHOWN = 0.8;     // s — matches tactical.js BLAST_SHOWN
 
 // 128px panel greeble: a base colour map and an emissive map of the seams.
 function panelTextures() {
@@ -141,6 +146,26 @@ export function makeCubeMesh(count) {
     return m;
   });
 
+  // Torpedoes: a bright core inside a soft halo, and their detonations.
+  const additive = (color, opacity = 1) => new THREE.MeshBasicMaterial({
+    color: new THREE.Color(...color), transparent: true, opacity,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const torps = Array.from({ length: TORP_SLOTS }, () => {
+    const core = new THREE.Mesh(flashGeo, additive([1.0, 0.9, 0.85]));
+    const halo = new THREE.Mesh(flashGeo, additive([1.0, 0.2, 0.1], 0.45));
+    core.scale.setScalar(0.035);
+    halo.scale.setScalar(2.6);            // relative to the core
+    core.add(halo);
+    core.visible = false; core.frustumCulled = halo.frustumCulled = false;
+    return core;
+  });
+  const blasts = Array.from({ length: TORP_SLOTS }, () => {
+    const m = new THREE.Mesh(flashGeo, additive([1.0, 0.45, 0.2]));
+    m.visible = false; m.frustumCulled = false;
+    return m;
+  });
+
   const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _p = new THREE.Vector3(), _s = new THREE.Vector3();
   const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
   const _yaw = new THREE.Quaternion(), _Y = new THREE.Vector3(0, 1, 0);
@@ -166,10 +191,11 @@ export function makeCubeMesh(count) {
   };
 
   return {
-    mesh, beams, tractor, phasers, flashes,
+    mesh, beams, tractor, phasers, flashes, torps, blasts,
     // cube: the live Cube; ship: the ship's world position; t: seconds;
-    // ours: Tactical's recent shots, timed on `ourT` (tactical.time).
-    update(cube, ship, t, ours = [], ourT = 0) {
+    // ours: Tactical's recent shots, timed on `ourT` (tactical.time);
+    // inFlight / landed: its torpedoes and their detonations, on the same clock.
+    update(cube, ship, t, ours = [], ourT = 0, inFlight = [], landed = []) {
       const rel = (p) => [p[0] - ship[0], p[1] - ship[1], p[2] - ship[2]];
       const r = rel(cube.pos);
       _yaw.setFromAxisAngle(_Y, cube.yaw);
@@ -232,6 +258,35 @@ export function makeCubeMesh(count) {
           f.scale.setScalar(0.05 + 0.25 * (1 - k));
           f.material.opacity = k;
         }
+      });
+
+      // Where a torpedo is headed: the face's centre, a little proud of it.
+      const faceAt = (face) => {
+        const n = cube.normal(face), c = rel(cube.pos);
+        return [c[0] + n[0] * 0.8, c[1] + n[1] * 0.8, c[2] + n[2] * 0.8];
+      };
+      torps.forEach((m, i) => {
+        const p = inFlight[i];
+        if (!p) { m.visible = false; return; }
+        const k = Math.min(1, (ourT - p.t) / p.flight);
+        const a = rel(p.from), b = faceAt(p.face);
+        // Out of the bow, a little below the camera, then on a shallow arc.
+        a[1] -= 0.35;
+        m.position.set(a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k + Math.sin(k * Math.PI) * 0.4, a[2] + (b[2] - a[2]) * k);
+        m.scale.setScalar(0.035 * (1 + 0.25 * Math.sin(t * 40 + i)));
+        m.visible = true;
+      });
+      blasts.forEach((m, i) => {
+        const s = landed[landed.length - 1 - i];
+        if (!s) { m.visible = false; return; }
+        const age = (ourT - s.t) / BLAST_SHOWN, k = Math.max(0, 1 - age);
+        let at;
+        if (s.block) at = rel(cube.blockPos(s.block));
+        else { const f = faceAt(s.face), n = cube.normal(s.face); at = [f[0] + n[0] * 1.2, f[1] + n[1] * 1.2 + 0.4, f[2] + n[2] * 1.2]; }
+        m.position.set(at[0], at[1], at[2]);
+        m.scale.setScalar(0.1 + 0.6 * Math.sqrt(age));
+        m.material.opacity = k * k;
+        m.visible = k > 0;
       });
 
       // Tractor: from whichever live node faces us, onto the hull.

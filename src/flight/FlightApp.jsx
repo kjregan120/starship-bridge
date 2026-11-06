@@ -44,7 +44,7 @@ const STATION_HELP = {
   conn: "CONN — standard orbit at the planet or moon we're holding at · sites for its landing sites and missions · away team to see who'd go, away team <name>, <name> to choose · beam down [to site a|b|c] · ahead full|half|quarter · reverse full|half|quarter · port|starboard <degrees> · all stop · come about for <name> · warp <1-3> to <name> · warp <1-3> · warp <1-3> route · drop out · magnify <1-10> · magnify in|out · magnify [<1-10>] on <name> to hold the viewer on a contact · magnify ahead · magnify off",
   science: "SCIENCE — ship status. scan · status for a report · withdraw to pull away from whatever is cooking the ship · reactor <0-120> to set the reactor's output limit (over 100 runs hot) · power <shields|engines|sensors|comms|life> <0-150> to change a system's share · power reset · repair <reactor|radiators|impulse|warp|emitters|life|comms|sensors|fore|aft|port|starboard> to put repair crews on it first · repair all · silence alarm · voice on|off · mute / unmute.",
   crew: "CREW — the forty aboard, on three watches (alpha 0800, beta 1600, gamma 0000; a ship hour is a minute). call all hands to bring everyone to their stations (more hands, faster repairs — but they tire) · stand down to go back to watches · all hands to shelter (radiation shelter, stations unmanned) · resume stations · evacuate <fore|aft|port|starboard> · send injured to sickbay · crew report · file <name> to open a personnel file · reassign <name> to <department> (needs Qualified or better in that department's core skill) · reassign <name> back · cross-train <name> in <department> to have them learn it. Click a section on the deck plan to evacuate it; click a name for their file.",
-  tactical: "TACTICAL — 3D chart. Drag to rotate, scroll to zoom, right-drag to pan. Shows any plotted course. In a fight the Tactical crew pick targets and rotate frequencies themselves; if no order comes in the few seconds after an enemy is in range, they engage. engage (or open fire) · hold fire · target <emitters|tractor|regen|core|auto> · stance <balanced|defensive|aggressive> · power weapons <0-150>.",
+  tactical: "TACTICAL — 3D chart. Drag to rotate, scroll to zoom, right-drag to pan. Shows any plotted course. In a fight the Tactical crew pick targets and rotate frequencies themselves; if no order comes in the few seconds after an enemy is in range, they engage. engage (or open fire) · hold fire · fire torpedo (you fire these yourself: a small magazine, a few seconds to reload, no frequency for them to adapt to) · target <emitters|tractor|regen|core|auto> · stance <balanced|defensive|aggressive> · power weapons <0-150>.",
   comms: "COMMS — auto-monitors the nearest contact's signal bands. Press LISTEN to hear a sonification of it. sweep for every contact in range · hail <name> to open a channel · tune <radio|microwave|elements|gravimetric|subspace> to filter toward one band, tune off to clear · decode to attempt to pull a message off the open channel (LISTEN first), decode stop to abort."
 };
 
@@ -290,6 +290,7 @@ function handleCommand(text) {
   if (/^(withdraw|evasive|retreat|get us out(?: of here)?|fall back)$/.test(t)) { withdraw(); return; }
   // Tactical (tactical.js): optional — the crew fight on their own.
   if (/^(engage|open fire|fire|fire at will|weapons free)$/.test(t)) { const r = tactical.engage(collective.cube); sim.log(r.ok ? "order" : "deny", r.text); return; }
+  if (/^(?:fire |launch )?(?:a )?(?:photon )?torpedo(?:e?s)?$/.test(t)) { const r = tactical.fireTorpedo(collective.cube, ship, sim.pos); sim.log(r.ok ? "order" : "deny", r.text); return; }
   if (/^(hold fire|cease fire|weapons hold|stop firing)$/.test(t)) { const r = tactical.holdFire(collective.cube); sim.log(r.ok ? "order" : "deny", r.text); return; }
   if ((m = t.match(/^target\s+(\w+)$/))) { const r = tactical.setTarget({ emitter: "emitters", nodes: "regen", tractors: "tractor" }[m[1]] ?? m[1]); sim.log(r.ok ? "order" : "deny", r.text); return; }
   if ((m = t.match(/^stance\s+(\w+)$/))) { const r = tactical.setStance(m[1]); sim.log(r.ok ? "order" : "deny", r.text); return; }
@@ -536,7 +537,7 @@ export default function FlightApp() {
       const s = sim.snapshot();
       useUI.getState().setSnapshot({
         mode: s.mode, speed: s.speed, throttle: s.throttle,
-        warpReady: sim.canEngageWarp(), t: s.t
+        warpReady: sim.canEngageWarp(), charging: sim.warpCharge != null, t: s.t
       });
       useUI.getState().setShip(ship.snapshot());
       useUI.getState().setAway(away ? away.snapshot() : null);
@@ -630,7 +631,7 @@ export default function FlightApp() {
           {alert.level !== "green" && !lost && (
             <span className={`alert-banner ${alert.level}`}>{alert.level === "red" ? "RED ALERT" : "YELLOW ALERT"}</span>
           )}
-          <span className="mode">{snap.mode === "warp" ? `WARP` : `IMPULSE ${Math.round(snap.throttle * 100)}%`}</span>
+          <span className="mode">{snap.mode === "warp" ? `WARP` : snap.charging ? `CHARGING WARP COILS` : `IMPULSE ${Math.round(snap.throttle * 100)}%`}</span>
           <span className="spd">{snap.speed.toFixed(1)} u/s</span>
           <span className={`warp ${snap.warpReady ? "ok" : "no"}`}>WARP {snap.warpReady ? "READY" : "BLOCKED"}</span>
           {listening && (

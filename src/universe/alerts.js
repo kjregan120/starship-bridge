@@ -187,6 +187,15 @@ export function assessThreats(ship) {
       : !w.inRange ? "Weapons engaged — out of range"
       : `Firing on ${AIM[w.aimingAt]} · freq ${w.band + 1} at ${Math.round(w.effect * 100)}% · gun crew ${Math.round(Math.min(1, w.crew) * 100)}%`;
     const inRange = cube.eta == null;
+    // Torpedoes: the captain's to fire — offer the button while there's a shot.
+    if (w && w.torpInRange && w.torpedoes > 0 && !w.offline) {
+      add({
+        id: "cube-torpedo", level: "red", sev: 87,
+        title: `Torpedoes — ${w.torpedoes} left`,
+        detail: w.tubeLoad > 0 ? `Tube loading · ${Math.ceil(w.tubeLoad)} s` : "Tube loaded",
+        eta: null, action: "fire torpedo", say: "",
+      });
+    }
     add({
       id: "cube", level: "red", sev: inRange ? 88 : 80,
       title: `${cube.name} — ${Math.round(cube.dist)}u${inRange ? "" : ", closing"}`,

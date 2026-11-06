@@ -30,8 +30,11 @@ export default function ViewscreenFX() {
   if (!ship) return null;
 
   const glare = Math.min(0.85, Math.max(0, (ship.flux.heat - 1.5) / 25));
-  // Static: from sensor damage, power starvation and noise together.
-  const sensorLoss = 1 - ship.sensorQuality;
+  // Static: from sensor damage and noise — not from power. Sensors losing
+  // their share to the warp coils reads as a glitch, so the warp charge-up
+  // (warpStreaks.js) shows that power being drawn off instead.
+  const sat = ship.power.sat.sensors ?? 1;
+  const sensorLoss = 1 - (sat > 0.01 ? ship.sensorQuality / sat : ship.health.sensors * (1 - ship.noise));
   const staticAmt = Math.max(0, sensorLoss - 0.15) * 0.45;
   const flicker = ship.health.sensors < 0.4 || ship.reactor.scrammed;
 

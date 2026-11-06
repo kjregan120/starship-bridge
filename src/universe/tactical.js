@@ -14,6 +14,13 @@
 // `target <emitters|tractor|regen|core|auto>`, `stance <defensive|balanced|
 // aggressive>` — and all the ordinary ones: power, all hands, the helm.
 //
+// Torpedoes are the one weapon the captain fires: `fire torpedo`, one at a
+// time from a small magazine. They reach further than the phasers, hit far
+// harder, and carry no frequency for the cube to adapt to — but the tube
+// takes a few seconds to reload (longer with a thin gun crew), they take
+// time to cross the gap, and the armory only builds new ones between fights.
+// The crew aim them at whatever they'd aim the phasers at.
+//
 //   idle ──cube in range──▶ hold ──5 s, or `engage`──▶ engaged
 //                             │                          │
 //                             └──`hold fire`──▶ holding ◀┘ (until `engage`)
@@ -35,6 +42,13 @@ const XP_PER_HIT = 6;                // weapons practice per hit, shared by the 
 const XP_ROTATE = 25;                // tactical-analysis practice per adaptation spotted
 const SHOT_SHOWN = 0.35;             // s a shot stays on the viewer
 const STARVED_AFTER = 2;             // s without power before the crew report it
+export const TORPEDO_RANGE = 24;     // u — further than the phasers
+export const MAGAZINE = 10;          // torpedoes carried
+const TORP_SPEED = 8;                // u/s
+const TORP_ENERGY = 1.6;             // four phaser volleys' worth, and no band to adapt to
+const RELOAD = 4;                    // s to load the tube, ÷ effectiveness
+const REFIT = 90;                    // s for the armory to build one, between fights
+const BLAST_SHOWN = 0.8;             // s a detonation stays on the viewer
 
 export const TARGETS = ["auto", "emitters", "tractor", "regen", "core"];
 const ROLE = { emitters: "emitter", tractor: "tractor", regen: "regen", core: "core" };
@@ -60,6 +74,12 @@ export class Tactical {
     this._offline = false;
     this._starved = 0;
     this._shields = 1;
+    this.torpedoes = MAGAZINE;
+    this.tubeLoad = 0;           // s until the tube is loaded
+    this.torps = [];             // in flight: { t, from, flight, face, role, aim, cube } — world `from`
+    this.blasts = [];            // { t, block | null, face, miss } — for the renderer
+    this._refit = 0;
+    this._dist = Infinity;
   }
 
   // ---- orders ----------------------------------------------------------------
@@ -91,6 +111,53 @@ export class Tactical {
     return { ok: true, text: `Tactical: ${s} — ${how}.` };
   }
 
+  // `fire torpedo`: one torpedo, at whatever the crew would aim at. Opens
+  // the fight if it hasn't started; leaves the phasers holding if they are.
+  fireTorpedo(cube, ship, shipPos) {
+    if (!cube || cube.disabled || cube.mode === "lost" || cube.mode === "dormant") return { ok: false, text: "No target for torpedoes." };
+    if (ship.health.weapons < WEAPONS_OFFLINE) return { ok: false, text: "Tactical: the torpedo launcher is off-line — too badly damaged." };
+    if (this.torpedoes <= 0) return { ok: false, text: "Tactical: we're out of torpedoes." };
+    if (this.tubeLoad > 0) return { ok: false, text: `Tactical: the tube is still loading — ${Math.ceil(this.tubeLoad)} s.` };
+    const d = Math.hypot(...cube.pos.map((x, i) => x - shipPos[i]));
+    if (d > TORPEDO_RANGE) return { ok: false, text: `Tactical: out of torpedo range — ${Math.round(d)}u, we need ${TORPEDO_RANGE}.` };
+    this._join(cube);
+    this.windowUsed = true;
+    if (this.state === "idle" || this.state === "hold") this.state = "engaged";
+    const { face, role } = this._choose(cube, ship, shipPos);
+    if (!face) return { ok: false, text: "Tactical: no clear shot." };
+    const keff = 0.1 + 0.9 * Math.min(1, this.crew(ship).k);
+    this.torpedoes--;
+    this.tubeLoad = RELOAD / keff;
+    this.torps.push({ t: this.time, from: [...shipPos], flight: d / TORP_SPEED, face, role, aim: 0.3 + 0.6 * keff, cube });
+    const left = this.torpedoes ? `${this.torpedoes} left` : "that was our last";
+    return { ok: true, text: `Tactical: torpedo away, at ${ROLE_WORDS[role]} — ${left}.` };
+  }
+
+  // Torpedoes in flight landing, the tube reloading, the armory restocking.
+  _torpedoes(dt, cube, ship, say) {
+    this.blasts = this.blasts.filter((b) => this.time - b.t < BLAST_SHOWN);
+    this.tubeLoad = Math.max(0, this.tubeLoad - dt);
+    if (this.state === "idle" && this.torpedoes < MAGAZINE) {
+      this._refit += dt;
+      if (this._refit >= REFIT) { this._refit = 0; this.torpedoes++; }
+    } else this._refit = 0;
+    const landed = this.torps.filter((p) => this.time - p.t >= p.flight);
+    this.torps = this.torps.filter((p) => this.time - p.t < p.flight);
+    for (const p of landed) {
+      // Its target gone or dead: it flies on into the dark.
+      if (p.cube !== cube || cube.disabled || cube.mode === "lost") continue;
+      if (this.random() >= 0.6 + 0.35 * Math.max(0, ship.sensorQuality())) {
+        this.blasts.push({ t: this.time, block: null, face: p.face, miss: true });
+        say("Tactical: torpedo missed.");
+        continue;
+      }
+      const r = cube.damage(p.face, TORP_ENERGY, { role: p.role, aim: p.aim });
+      this.blasts.push({ t: this.time, block: r.blocks[0] ?? null, face: p.face, miss: false });
+      if (r.dealt > 0) ship.roster.credit(ship.roster.workers(["tactical"], "weapons"), "weapons", XP_PER_HIT * 2, ship.time);
+      say(`Tactical: torpedo hit — ${ROLE_WORDS[p.role]}.`);
+    }
+  }
+
   // How hard the weapons are drawing, 0..1, for the ship's power budget
   // (ShipSystems env.weaponsLoad): charged and waiting while holding, by
   // stance while firing.
@@ -119,6 +186,7 @@ export class Tactical {
     this._shields = ship.shields;
     const out = [];
     const say = (text, kind = "info") => out.push({ type: "say", kind, text });
+    this._torpedoes(dt, cube, ship, say);
 
     // The encounter: a new cube is a new one; gone, lost or disabled ends it.
     if (!cube || cube.mode === "lost" || cube.disabled || cube.mode === "dormant") {
@@ -128,6 +196,7 @@ export class Tactical {
     if (this.encounter !== cube) this._join(cube);
 
     const d = Math.hypot(...cube.pos.map((x, i) => x - shipPos[i]));
+    this._dist = d;
     this._inRange = d <= RANGE;
     const { workers, k } = this.crew(ship);
     this.k = k;
@@ -254,6 +323,8 @@ export class Tactical {
     this._notice = 0;
     this._offline = false;
     this._inRange = false;
+    this._dist = Infinity;
+    this.torps = [];
   }
 
   // For the alerts and the dashboard.
@@ -262,6 +333,7 @@ export class Tactical {
       state: this.state, holdLeft: Math.max(0, this.holdLeft), band: this.band, stance: this.stance,
       target: this.target, aimingAt: this.aimingAt, crew: this.k, inRange: !!this._inRange,
       effect: cube ? 1 - cube.resist[this.band] : 1, offline: this._offline,
+      torpedoes: this.torpedoes, tubeLoad: this.tubeLoad, torpInRange: this._dist <= TORPEDO_RANGE,
     };
   }
 }

@@ -48,6 +48,11 @@ export class FlightSim {
     this.heading = null;       // {type:'body',id} | {type:'point',p} — used by both impulse and warp
     this.waypoints = [];       // bends plotted around hazards, flown before `heading`
     this.warpFactor = 2;
+    // Engaging warp draws power into the coils first: the ship carries on at
+    // impulse for warpChargeTime, then jumps. {left, total, apply} while
+    // charging — any other helm order aborts it. See _chargeWarp.
+    this.warpChargeTime = opts.warpChargeTime ?? 1.5;
+    this.warpCharge = null;
     this.facing = [0, 0, 1];   // ship's nose, kept even when stopped — see _impulseStep
     // Max rate the nose swings (rad per real second). Thrust still steers
     // along the desired direction; only the nose (and so the viewscreen)
@@ -105,11 +110,13 @@ export class FlightSim {
 
   // ---------------- orders ----------------
   allStop() {
+    this._cancelCharge();
     this.mode = "impulse"; this.throttle = 0; this.thrustSign = 1;
     this.heading = null; this.waypoints = []; this.pendingTurn = 0;
     this.log("order", "All stop.");
   }
   ahead(frac) {
+    this._cancelCharge();
     this.mode = "impulse"; this.throttle = Math.max(0, Math.min(1, frac)); this.thrustSign = 1;
     // Leaving station-keeping is the point of "ahead" — an active heading
     // (body/point) is left alone so this can just adjust speed mid-approach.
@@ -121,6 +128,7 @@ export class FlightSim {
   // heading lock — you can't back away while the autopilot is steering you
   // toward a target.
   reverse(frac) {
+    this._cancelCharge();
     this.mode = "impulse"; this.throttle = Math.max(0, Math.min(1, frac)); this.thrustSign = -1;
     this.heading = null; this.waypoints = [];
     this.log("order", `Reverse thrusters, impulse ${Math.round(this.throttle * 100)}%.`);
@@ -128,6 +136,7 @@ export class FlightSim {
   comeAbout(q) {
     const o = this.find(q);
     if (!o) { this.log("deny", `No contact matching "${q}".`); return false; }
+    this._cancelCharge();
     const route = this._planWaypoints(this.posOf(o.id), new Set([o.id]));
     this.heading = { type: "body", id: o.id }; this.pendingTurn = 0;
     this.mode = "impulse";
@@ -148,6 +157,7 @@ export class FlightSim {
     if (q && !body) { this.log("deny", `No contact matching "${q}".`); return false; }
     if (!body) { this.log("deny", "We're not holding station at anything. Come about for a planet or moon first."); return false; }
     if (body.type !== "planet" && body.type !== "moon") { this.log("deny", `We can't make orbit around ${body.name}.`); return false; }
+    this._cancelCharge();
     if (held?.id !== body.id) {
       if (bound?.id !== body.id && !this.comeAbout(body.name)) return false;
       this.orbitOnArrival = body.id;
@@ -166,6 +176,7 @@ export class FlightSim {
     return h?.type === "hold" && !!h.orbit?.established && (id == null || h.id === id);
   }
   steerToPoint(p) {
+    this._cancelCharge();
     const route = this._planWaypoints(p, new Set());
     this.heading = { type: "point", p }; this.pendingTurn = 0; this.mode = "impulse";
     if (this.throttle === 0) this.throttle = 0.6;
@@ -184,6 +195,7 @@ export class FlightSim {
   turn(dir, degrees) {
     const deg = Math.max(0, degrees || 0);
     if (deg === 0) return;
+    this._cancelCharge();
     const sign = dir === "port" ? -1 : 1;
     this.pendingTurn += (Math.PI / 180) * deg * sign;
     this.heading = null; this.waypoints = [];
@@ -208,15 +220,13 @@ export class FlightSim {
         `Recommend impulse power to clear.`);
       return false;
     }
-    this.mode = "warp"; this.warpFactor = f; this.waypoints = [];
-    if (o) {
-      this.heading = { type: "body", id: o.id }; this.pendingTurn = 0;
-      this.log("order", `Course laid in for ${o.name}. Warp ${f}, engage.`);
-    } else {
-      this.heading = null;
-      this.log("order", `Warp ${f}, engage — holding present heading.`);
-    }
-    return true;
+    return this._chargeWarp(
+      o ? `Course laid in for ${o.name}. Warp ${f}` : `Warp ${f}, holding present heading`,
+      () => {
+        this.mode = "warp"; this.warpFactor = f; this.waypoints = [];
+        if (o) { this.heading = { type: "body", id: o.id }; this.pendingTurn = 0; }
+        else this.heading = null;
+      });
   }
   // Flies the route currently plotted by come-about/steer-to-point (heading +
   // any bends already in this.waypoints) at warp instead of impulse — same
@@ -236,11 +246,37 @@ export class FlightSim {
         `Recommend impulse power to clear.`);
       return false;
     }
-    this.mode = "warp"; this.warpFactor = f; this.pendingTurn = 0;
-    this.log("order", this.waypoints.length
-      ? `Helm, take the plotted course. Warp ${f}, engage — ${this.waypoints.length} bend${this.waypoints.length > 1 ? "s" : ""} ahead.`
-      : `Helm, take the plotted course. Warp ${f}, engage.`);
+    const bends = this.waypoints.length;
+    return this._chargeWarp(
+      bends ? `Helm, take the plotted course, ${bends} bend${bends > 1 ? "s" : ""} ahead. Warp ${f}` : `Helm, take the plotted course. Warp ${f}`,
+      () => {
+        // Arrived (or the course was dropped) while the coils charged.
+        if (!this.heading || this.heading.type === "hold") { this.log("info", "No course left to take at warp. Standing down the coils."); return false; }
+        this.mode = "warp"; this.warpFactor = f; this.pendingTurn = 0;
+      });
+  }
+
+  // Charges the coils, then `apply()` makes the jump (it may return false if
+  // the reason for it is gone). With no charge time, jumps at once.
+  _chargeWarp(what, apply) {
+    if (this.warpChargeTime <= 0) {
+      apply();
+      this.log("order", `${what}, engage.`);
+      return true;
+    }
+    this.warpCharge = { left: this.warpChargeTime, total: this.warpChargeTime, apply };
+    this.log("order", `${what}. Charging the warp coils.`);
     return true;
+  }
+  _cancelCharge(why = null) {
+    if (!this.warpCharge) return false;
+    this.warpCharge = null;
+    this.log(why ? "deny" : "info", why ? `Warp charge aborted — ${why}.` : "Warp charge aborted.");
+    return true;
+  }
+  // 0..1 through the charge, or null when not charging.
+  get warpChargeProgress() {
+    return this.warpCharge ? 1 - this.warpCharge.left / this.warpCharge.total : null;
   }
   // The ordered factor, held to the configured cap and to what damaged coils
   // can sustain — logged when the coils are the reason it's lower.
@@ -252,12 +288,14 @@ export class FlightSim {
   }
   // Ship's systems pulled the plug (reactor scram, field starved of power).
   forceDropOut(reason) {
+    if (this._cancelCharge(reason)) return;
     if (this.mode !== "warp") return;
     this.mode = "impulse"; this.throttle = 0;
     this.heading = null; this.waypoints = [];
     this.log("deny", `Warp field collapse — ${reason}. Dropped to impulse.`);
   }
   dropOut() {
+    if (this._cancelCharge()) return;
     if (this.mode === "warp") {
       this.mode = "impulse"; this.throttle = 0;
       this.heading = null; this.waypoints = [];
@@ -277,6 +315,14 @@ export class FlightSim {
   // warp sweeps at the same visible rate as one at impulse.
   step(dt, realDt = dt) {
     this.t += dt;
+    if (this.warpCharge) {
+      if (this.warpInhibit) this._cancelCharge(this.warpInhibit);
+      else if ((this.warpCharge.left -= dt) <= 0) {
+        const { apply } = this.warpCharge;
+        this.warpCharge = null;
+        if (apply() !== false) this.log("order", "Engage.");
+      }
+    }
     this._manualTurnStep(realDt);
     if (this.mode === "warp") this._warpStep(dt);
     else this._impulseStep(dt);
@@ -426,10 +472,14 @@ export class FlightSim {
           this.log("arrive", `Standard orbit established around ${this.byId[this.heading.id].name}.`);
         }
         // Flatten toward the body's equator as we go, and swing around it.
+        // The nose swings with us, so the body keeps its place on the
+        // viewscreen instead of sliding off the side as we circle it.
         if (Math.hypot(off[0], off[2]) < 1e-6) off = [1, 0, 0];
         off = [off[0], off[1] * Math.max(0, 1 - dt * 0.5), off[2]];
         const a = ORBIT_RATE * dt, c = Math.cos(a), s = Math.sin(a);
-        off = [off[0] * c - off[2] * s, off[1], off[0] * s + off[2] * c];
+        const rotY = ([x, y, z]) => [x * c - z * s, y, x * s + z * c];
+        off = rotY(off);
+        this.facing = unit(rotY(this.facing));
         this.heading.offset = scale(off, nr / (magnitude(off) || 1));
       }
       this.pos = add(this.posOf(this.heading.id), this.heading.offset);

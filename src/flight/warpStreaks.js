@@ -80,6 +80,12 @@ void main() {
 // A full-screen quad: a burst at the vanishing point (the middle of the
 // viewer, since the view looks straight down the line of travel at warp)
 // with a long horizontal flare through it.
+//
+// Before the burst, the charge: power drawn off the other systems. The view
+// dims toward the edges, conduits of amber power stream in from all sides
+// to the vanishing point, and a core builds there, blue-white, until it
+// lets go as the flash. Blended as premultiplied colour over the scene —
+// alpha darkens what's behind, colour adds light on top.
 const flashVertex = /* glsl */ `
 varying vec2 vP;
 uniform float uAspect;
@@ -91,12 +97,30 @@ void main() {
 const flashFragment = /* glsl */ `
 varying vec2 vP;
 uniform float uFlash;
+uniform float uCharge;
+uniform float uTime;
+float hash(float n) { return fract(sin(n * 12.9898) * 43758.5453); }
 void main() {
   float r = length(vP);
   float burst = exp(-r * r * 9.0) + 0.35 * exp(-r * 2.5);
   float flare = exp(-abs(vP.y) * 70.0) * exp(-abs(vP.x) * 1.2);
-  vec3 col = vec3(0.75, 0.85, 1.0) * burst + vec3(0.55, 0.7, 1.0) * flare;
-  gl_FragColor = vec4(col * uFlash, 1.0);
+  vec3 col = (vec3(0.75, 0.85, 1.0) * burst + vec3(0.55, 0.7, 1.0) * flare) * uFlash;
+
+  // Conduits: thin lanes around the vanishing point, about half of them
+  // live, each with bright pulses running inward. They reach further in as
+  // the charge builds.
+  float lanes = 36.0;
+  float u = (atan(vP.y, vP.x) / 6.2831853 + 0.5) * lanes;
+  float h = hash(floor(u));
+  float beam = smoothstep(0.32, 0.0, abs(fract(u) - 0.5)) * step(0.45, h);
+  float pulse = smoothstep(0.55, 1.0, fract(r * 2.5 + uTime * (1.4 + h) + h * 7.0));
+  float reach = smoothstep(0.0, 0.25, r - mix(1.5, 0.04, uCharge));
+  vec3 hot = mix(vec3(0.55, 0.8, 1.2), vec3(1.0, 0.55, 0.2), smoothstep(0.15, 1.1, r));
+  col += hot * beam * (0.25 + pulse) * reach * uCharge * 0.9;
+  col += vec3(0.6, 0.8, 1.2) * exp(-r * r * 40.0) * uCharge * uCharge * 1.6;
+
+  float dim = uCharge * 0.45 * smoothstep(0.1, 1.0, r);
+  gl_FragColor = vec4(col, dim);
 }
 `;
 
@@ -149,18 +173,20 @@ function makeWarpStreaks() {
 
   const flashGeometry = new THREE.PlaneGeometry(2, 2);
   const flashMaterial = new THREE.ShaderMaterial({
-    uniforms: { uFlash: { value: 0 }, uAspect: { value: 1 } },
+    uniforms: { uFlash: { value: 0 }, uAspect: { value: 1 }, uCharge: { value: 0 }, uTime: { value: 0 } },
     vertexShader: flashVertex,
     fragmentShader: flashFragment,
     transparent: true,
     depthTest: false,
     depthWrite: false,
-    blending: THREE.AdditiveBlending,
+    blending: THREE.CustomBlending,
+    blendSrc: THREE.OneFactor,
+    blendDst: THREE.OneMinusSrcAlphaFactor,
   });
 
   // State lives here, not in the component, so switching stations mid-warp
   // doesn't replay the jump when you come back to CONN.
-  let amt = 0, travel = 0, flash = 0, snapped = false, last = 0;
+  let amt = 0, travel = 0, flash = 0, charge = 0, snapped = false, last = 0, clock = 0;
 
   return {
     geometry,
@@ -168,26 +194,37 @@ function makeWarpStreaks() {
     flashGeometry,
     flashMaterial,
     get visible() { return amt > 0.002; },
-    get flashing() { return flash > 0.002; },
-    // `warping`: sim.mode === "warp"; `factor`: sim.warpFactor; viewport in
-    // device px; `pr`: the pixel ratio.
-    tick(dt, warping, factor, width, height, pr) {
+    get flashing() { return flash > 0.002 || charge > 0.002; },
+    // `warping`: sim.mode === "warp"; `charging`: sim.warpChargeProgress
+    // (0..1, or null); `factor`: sim.warpFactor; viewport in device px;
+    // `pr`: the pixel ratio.
+    tick(dt, warping, charging, factor, width, height, pr) {
       const now = performance.now();
       const away = now - last > 500; // the viewer wasn't on screen
       last = now;
-      if (away) { amt = warping ? 1 : 0; snapped = warping; flash = 0; }
+      clock += dt;
+      if (away) { amt = warping ? 1 : 0; snapped = warping; flash = 0; charge = 0; }
 
-      if (warping) amt = Math.min(1, amt + dt / ENGAGE_TIME);
-      else amt = Math.max(0, amt - dt / DROP_TIME);
-      // The jump: a bright flash once the stars are stretched; a softer
-      // one going back to impulse.
-      if (warping && !snapped && amt >= SNAP_AT) { snapped = true; flash = 1; }
+      if (charging != null) {
+        // Drawing power: the stars only start to stretch as the charge tops out.
+        charge = charging;
+        amt = SNAP_AT * Math.max(0, (charge - 0.6) / 0.4);
+      } else if (warping) {
+        amt = Math.min(1, amt + dt / ENGAGE_TIME);
+      } else {
+        amt = Math.max(0, amt - dt / DROP_TIME);
+      }
+      // The jump: a bright flash the moment the sim goes to warp; a softer
+      // one going back to impulse. The charge drains fast after either (or
+      // an abort).
+      if (warping && !snapped) { snapped = true; flash = 1; }
       if (!warping && snapped) { snapped = false; flash = Math.max(flash, 0.6); }
+      if (charging == null) charge *= Math.exp(-dt / 0.12);
       flash *= Math.exp(-dt / 0.18);
 
       // Before the jump the stars barely move; after it they rush.
       const stretch = amt * amt * (3 - 2 * amt);
-      const pace = warping ? (amt < SNAP_AT ? 0.15 : 1) : stretch;
+      const pace = warping ? (snapped ? 1 : 0.15) : stretch;
       // Wrapped on a whole number of tube lengths, so the wrap is invisible.
       travel = (travel + dt * (90 + 70 * factor) * pace) % (DEPTH * 300);
 
@@ -198,6 +235,8 @@ function makeWarpStreaks() {
       u.uWidth.value = 1.3 * pr;
       u.uViewport.value.set(width, height);
       flashMaterial.uniforms.uFlash.value = flash;
+      flashMaterial.uniforms.uCharge.value = charge;
+      flashMaterial.uniforms.uTime.value = clock;
       flashMaterial.uniforms.uAspect.value = width / height;
     },
   };

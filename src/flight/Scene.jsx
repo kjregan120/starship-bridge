@@ -278,15 +278,28 @@ function BeaconMesh({ obj }) {
 // approach instead of its whole system popping into existence at the last
 // moment. The HUD's "current system" label still names the true nearest star.
 // Black holes get the same early-render treatment, from farther out.
+//
+// Not at warp, though: at warp 3 the ship crosses the whole render range in
+// about half a second, so every check would tear down and build a fresh set
+// of systems (~45 bodies a second) — and each star coming or going changes
+// the scene's light count, which recompiles every lit material. That's what
+// froze the viewscreen. At warp it's streaks and dots; systems come back the
+// moment the ship drops out.
 function LocalSystem() {
   const [starIds, setStarIds] = useState([]);
   const [bhIds, setBhIds] = useState([]);
   const [beaconIds, setBeaconIds] = useState([]);
+  const tickRef = useRef(null);
+  const modeRef = useRef(sim.mode);
+  useFrame(() => {
+    if (sim.mode !== modeRef.current) { modeRef.current = sim.mode; tickRef.current?.(); }
+  });
   useEffect(() => {
     const tick = () => {
-      const nearStars = starsWithin(SYSTEM_RENDER_RANGE);
-      const nearBH = blackholesWithin(BLACKHOLE_RENDER_RANGE);
-      const nearBeacons = beaconsWithin(BEACON_RENDER_RANGE);
+      const warping = sim.mode === "warp";
+      const nearStars = warping ? [] : starsWithin(SYSTEM_RENDER_RANGE);
+      const nearBH = warping ? [] : blackholesWithin(BLACKHOLE_RENDER_RANGE);
+      const nearBeacons = warping ? [] : beaconsWithin(BEACON_RENDER_RANGE);
       setStarIds(nearStars.map((s) => s.id));
       setBhIds(nearBH.map((o) => o.id));
       setBeaconIds(nearBeacons.map((o) => o.id));
@@ -297,9 +310,10 @@ function LocalSystem() {
       const { star } = nearestStar();
       useUI.getState().setSystemName(star ? star.name : "deep space");
     };
+    tickRef.current = tick;
     tick();
     const iv = setInterval(tick, 1000);
-    return () => clearInterval(iv);
+    return () => { clearInterval(iv); tickRef.current = null; };
   }, []);
   const bodies = useMemo(
     () => starIds.flatMap((id) => systemBodies(sim.byId[id])),
@@ -346,10 +360,11 @@ function CubeBody() {
     parts.mesh.geometry.dispose(); parts.mesh.material.dispose();
     parts.beams.forEach((b) => b.material.dispose());
     parts.tractor.material.dispose();
-    [...parts.phasers, ...parts.flashes].forEach((b) => b.material.dispose());
+    [...parts.phasers, ...parts.flashes, ...parts.blasts].forEach((b) => b.material.dispose());
+    parts.torps.forEach((b) => { b.material.dispose(); b.children[0].material.dispose(); });
   }, [parts]);
   useFrame((state) => {
-    if (collective.cube === cube) parts.update(cube, sim.pos, state.clock.elapsedTime, tactical.shots, tactical.time);
+    if (collective.cube === cube) parts.update(cube, sim.pos, state.clock.elapsedTime, tactical.shots, tactical.time, tactical.torps, tactical.blasts);
   });
   return (
     <>
@@ -358,6 +373,8 @@ function CubeBody() {
       <primitive object={parts.tractor} />
       {parts.phasers.map((b, i) => <primitive key={`p${i}`} object={b} />)}
       {parts.flashes.map((b, i) => <primitive key={`f${i}`} object={b} />)}
+      {parts.torps.map((b, i) => <primitive key={`t${i}`} object={b} />)}
+      {parts.blasts.map((b, i) => <primitive key={`x${i}`} object={b} />)}
     </>
   );
 }
@@ -374,7 +391,7 @@ function WarpStreaks() {
   const facing = useMemo(() => new THREE.Vector3(), []);
   useFrame((state, dt) => {
     const pr = state.gl.getPixelRatio();
-    warpStreaks.tick(Math.min(dt, 0.1), sim.mode === "warp", sim.warpFactor, size.width * pr, size.height * pr, pr);
+    warpStreaks.tick(Math.min(dt, 0.1), sim.mode === "warp", sim.warpChargeProgress, sim.warpFactor, size.width * pr, size.height * pr, pr);
     const f = view.facing;
     groupRef.current.quaternion.setFromUnitVectors(STREAK_AXIS, facing.set(f[0], f[1], f[2]).normalize());
     groupRef.current.visible = warpStreaks.visible;
